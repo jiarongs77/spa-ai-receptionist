@@ -2160,10 +2160,242 @@ async function main() {
            '5. GET / returns 404 (only POST /mcp is served)');
       }
 
-      await httpClient.close();
+       await httpClient.close();
     } finally {
       httpServer.kill('SIGTERM');
       // Restore fixtures again after the HTTP test (it only reads, but be safe).
+      saveAppointments(apptSnapshot);
+      saveCustomers(custSnapshot);
+    }
+  }
+
+  console.log('\n[17] REST webhook endpoints (/api/*)');
+  {
+    // Spawn a fresh HTTP server for the REST tests on a different port.
+    const port = 3997;
+    const restServer = spawn(
+      process.execPath,
+      [serverPath, '--http'],
+      { env: { ...process.env, PORT: String(port), MCP_TRANSPORT: undefined } },
+    );
+    let restLog = '';
+    restServer.stdout.on('data', (d: Buffer) => { restLog += d.toString(); });
+    restServer.stderr.on('data', (d: Buffer) => { restLog += d.toString(); });
+
+    const started = await new Promise<boolean>((resolve) => {
+      const deadline = setTimeout(() => resolve(false), 8000);
+      restServer.stdout.on('data', () => {
+        if (/REST webhook/.test(restLog)) {
+          clearTimeout(deadline);
+          resolve(true);
+        }
+      });
+    });
+    ok(started, '0. REST HTTP server boots and logs /api/*');
+    if (!started) {
+      console.error('REST server failed to start. Log:\n', restLog);
+      restServer.kill('SIGKILL');
+      process.exit(1);
+    }
+    await new Promise((r) => setTimeout(r, 100));
+
+    const base = `http://localhost:${port}`;
+    const post = async (path: string, body: unknown) => {
+      const r = await fetch(base + path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const text = await r.text();
+      let data: any = null;
+      try { data = JSON.parse(text); } catch { data = text; }
+      return { status: r.status, data, contentType: r.headers.get('content-type') };
+    };
+
+    try {
+      // 1. Unknown endpoint -> 404.
+      {
+        const r = await post('/api/nope', {});
+        ok(r.status === 404 && /Unknown API endpoint/.test(JSON.stringify(r.data)),
+           '1. unknown /api endpoint -> 404 JSON error');
+      }
+
+      // 2. get-service-info: success.
+      {
+        saveAppointments(apptSnapshot);
+        saveCustomers(custSnapshot);
+        const r = await post('/api/get-service-info', { service: 'Swedish Massage' });
+        ok(r.status === 200 && r.contentType === 'application/json',
+           '2a. get-service-info 200 + application/json');
+        ok(r.data.found === true && r.data.id === 'svc-swedish-massage' &&
+           r.data.duration_minutes === 60 && r.data.price_usd === 110,
+           '2b. get-service-info returns service details');
+      }
+
+      // 3. get-service-info: validation error.
+      {
+        const r = await post('/api/get-service-info', {});
+        ok(r.status === 400 && /required/.test(JSON.stringify(r.data)),
+           '3. get-service-info missing service -> 400 JSON error');
+      }
+
+      // 4. get-service-info: not-found result.
+      {
+        const r = await post('/api/get-service-info', { service: 'Hot Stone' });
+        ok(r.status === 200 && r.data.found === false,
+           '4. get-service-info unknown service -> 200 found:false');
+      }
+
+      // 5. check-availability: success.
+      {
+        saveAppointments(apptSnapshot);
+        saveCustomers(custSnapshot);
+        const r = await post('/api/check-availability',
+          { service: 'svc-deep-tissue-massage', date: '2026-10-05' });
+        ok(r.status === 200 && r.data.available === true,
+           '5a. check-availability 200 + available');
+        ok(Array.isArray(r.data.slots) && r.data.slots.length > 0,
+           '5b. check-availability returns slots');
+      }
+
+      // 6. check-availability: invalid date -> 400.
+      {
+        const r = await post('/api/check-availability',
+          { service: 'svc-swedish-massage', date: 'Feb 30 2026' });
+        ok(r.status === 400 && /not a valid calendar date/.test(JSON.stringify(r.data)),
+           '6. check-availability invalid date -> 400');
+      }
+
+      // 7. create-booking (existing customer) + 8. get-appointment by id.
+      {
+        saveAppointments(apptSnapshot);
+        saveCustomers(custSnapshot);
+        const r = await post('/api/create-booking', {
+          customer_id: CUS_ELENA,
+          service: 'svc-swedish-massage',
+          therapist_id: 'thr-priya',
+          start_time: '2026-10-06T12:00:00-07:00',
+        });
+        ok(r.status === 200 && r.data.success === true,
+           '7a. create-booking 200 + success');
+        ok(UUID_RE.test(r.data.customer_id) && r.data.customer_id === CUS_ELENA,
+           '7b. create-booking returns existing customer UUID');
+        const apptId = r.data.appointment_id;
+        ok(typeof apptId === 'string' && apptId.startsWith('apt-'),
+           '7c. returns appointment_id');
+
+        const g = await post('/api/get-appointment', { appointment_id: apptId });
+        ok(g.status === 200 && g.data.found === true && g.data.count === 1,
+           '8a. get-appointment by id 200 + found');
+        ok(g.data.appointments[0].id === apptId,
+           '8b. returns the just-created appointment');
+        ok(g.data.appointments[0].customer_name === 'Elena Marsh',
+           '8c. appointment includes customer_name');
+      }
+
+      // 9. create-booking (new customer) + get-appointment by customer_name.
+      {
+        saveAppointments(apptSnapshot);
+        saveCustomers(custSnapshot);
+        const r = await post('/api/create-booking', {
+          customer: { name: 'REST Newerson', phone: '+1-415-555-7777' },
+          service: 'svc-swedish-massage',
+          therapist_id: 'thr-maya',
+          start_time: '2026-10-06T12:00:00-07:00',
+        });
+        ok(r.status === 200 && r.data.success === true, '9a. new-customer booking 200');
+        ok(UUID_RE.test(r.data.customer_id) &&
+           ![CUS_ELENA, CUS_DAVID, CUS_SOFIA].includes(r.data.customer_id),
+           '9b. new customer got a fresh UUID');
+
+        const g = await post('/api/get-appointment', { customer_name: 'REST Newerson' });
+        ok(g.status === 200 && g.data.found === true && g.data.count === 1,
+           '9c. get-appointment by customer_name 200 + found');
+        ok(g.data.appointments[0].customer_id === r.data.customer_id,
+           '9d. appointment references the new UUID');
+      }
+
+      // 10. create-booking: validation error (missing customer identification).
+      {
+        const r = await post('/api/create-booking', {
+          service: 'svc-facial',
+          start_time: '2026-10-06T11:00:00-07:00',
+        });
+        ok(r.status === 400 && /exactly one/i.test(JSON.stringify(r.data)),
+           '10. create-booking missing customer -> 400');
+      }
+
+      // 11. reschedule-booking + 12. get-appointment after reschedule.
+      {
+        saveAppointments(apptSnapshot);
+        saveCustomers(custSnapshot);
+        const r = await post('/api/reschedule-booking', {
+          appointment_id: 'apt-1001',
+          new_start_time: '2026-10-05T13:00:00-07:00',
+        });
+        ok(r.status === 200 && r.data.rescheduled === true,
+           '11a. reschedule-booking 200 + rescheduled');
+        ok(r.data.appointment.id === 'apt-1001' &&
+           r.data.appointment.start_time.startsWith('2026-10-05T13:00'),
+           '11b. reschedule returns updated start_time');
+        ok(r.data.appointment.customer_name === 'David Okonkwo',
+           '11c. reschedule preserves customer_name');
+
+        const g = await post('/api/get-appointment', { appointment_id: 'apt-1001' });
+        ok(g.status === 200 && g.data.found === true,
+           '12a. get-appointment after reschedule 200 + found');
+        ok(g.data.appointments[0].start_time.startsWith('2026-10-05T13:00'),
+           '12b. get-appointment reflects the new time');
+        ok(g.data.appointments[0].therapist_id === 'thr-maya',
+           '12c. reschedule kept same therapist (no new requested)');
+      }
+
+      // 13. reschedule-booking: validation error (unknown appointment).
+      {
+        const r = await post('/api/reschedule-booking', {
+          appointment_id: 'apt-9999',
+          new_start_time: '2026-10-08T10:00:00-07:00',
+        });
+        ok(r.status === 200 && r.data.rescheduled === false,
+           '13. reschedule unknown appointment -> 200 rescheduled:false');
+      }
+
+      // 14. Duplicate-name ambiguity via REST.
+      {
+        saveAppointments(apptSnapshot);
+        const dupId1 = randomUUID();
+        const dupId2 = randomUUID();
+        const seeded = [...custSnapshot,
+          { id: dupId1, name: 'Rest Dup', phone: '+1-415-555-9001', email: '', postcode: '', date_of_birth: '' },
+          { id: dupId2, name: 'Rest Dup', phone: '+1-415-555-9002', email: '', postcode: '', date_of_birth: '' },
+        ];
+        saveCustomers(seeded);
+
+        const g = await post('/api/get-appointment', { customer_name: 'Rest Dup' });
+        ok(g.status === 200 && g.data.ambiguous === true &&
+           g.data.matching_customers.length === 2,
+           '14. get-appointment duplicate name -> ambiguous candidates');
+      }
+
+      // 15. Invalid JSON body -> 400.
+      {
+        const r = await fetch(base + '/api/get-service-info', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{not valid json',
+        });
+        const data = await r.json();
+        ok(r.status === 400 && /Invalid JSON/.test(JSON.stringify(data)),
+           '15. invalid JSON body -> 400');
+      }
+
+      // 16. Non-POST method on /api -> 404.
+      {
+        const r = await fetch(base + '/api/get-service-info');
+        ok(r.status === 404, '16. GET on /api endpoint -> 404 (POST only)');
+      }
+    } finally {
+      restServer.kill('SIGTERM');
       saveAppointments(apptSnapshot);
       saveCustomers(custSnapshot);
     }

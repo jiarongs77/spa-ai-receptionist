@@ -24,7 +24,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID } from 'node:crypto';
-import { createServer } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 
 import {
   loadServices, loadTherapists, loadCustomers, loadAppointments,
@@ -827,6 +827,83 @@ function toolError(message: string) {
   return { content: [{ type: 'text', text: JSON.stringify({ error: message }, null, 2) }], isError: true };
 }
 
+// ---------- REST webhook adapter (Telnyx AI Assistant) ----------
+//
+// Thin REST wrappers around the SAME handler functions used by the MCP
+// tools (handleGetServiceInfo, etc.). The handlers return MCP-shaped
+// envelopes ({ content: [{ type: 'text', text }] }, optionally isError).
+// `unwrapForRest` converts those to plain JSON for HTTP responses, and
+// `sendJson` writes them. No business logic is duplicated: every REST
+// endpoint calls exactly one existing handler.
+
+type McpEnvelope = {
+  content: Array<{ type: string; text: string }>;
+  isError?: boolean;
+};
+
+function unwrapForRest(mcpResult: McpEnvelope): { status: number; body: unknown } {
+  const body = JSON.parse(mcpResult.content[0].text);
+  return { status: mcpResult.isError ? 400 : 200, body };
+}
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  const json = JSON.stringify(body, null, 2);
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(json);
+}
+
+async function readJsonObject(req: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', (chunk: Buffer) => { raw += chunk.toString(); });
+    req.on('end', () => {
+      if (!raw) return resolve({});
+      try {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          return reject(new Error('Request body must be a JSON object.'));
+        }
+        resolve(parsed as Record<string, unknown>);
+      } catch {
+        reject(new Error('Invalid JSON body.'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+const REST_ROUTES: Record<string, (args: Record<string, unknown>) => McpEnvelope> = {
+  '/api/get-service-info': handleGetServiceInfo,
+  '/api/check-availability': handleCheckAvailability,
+  '/api/create-booking': handleCreateBooking,
+  '/api/get-appointment': handleGetAppointment,
+  '/api/reschedule-booking': handleRescheduleBooking,
+};
+
+async function handleRestRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
+  const path = req.url ?? '';
+  const handler = REST_ROUTES[path];
+  if (!handler) {
+    sendJson(res, 404, { error: `Unknown API endpoint: ${path}` });
+    return;
+  }
+  let args: Record<string, unknown>;
+  try {
+    args = await readJsonObject(req);
+  } catch (e) {
+    sendJson(res, 400, { error: e instanceof Error ? e.message : 'Invalid request body.' });
+    return;
+  }
+  try {
+    const mcpResult = handler(args);
+    const { status, body } = unwrapForRest(mcpResult);
+    sendJson(res, status, body);
+  } catch (e) {
+    // Handler threw (e.g. invalid date/time parse). Return a clear 400.
+    sendJson(res, 400, { error: e instanceof Error ? e.message : 'Request failed.' });
+  }
+}
+
 // ---------- Boot ----------
 //
 // Select transport: stdio (default) or http (Streamable HTTP on PORT).
@@ -851,14 +928,19 @@ if (useHttp) {
       await httpTransport.handleRequest(req, res);
       return;
     }
+    if (req.method === 'POST' && req.url?.startsWith('/api/')) {
+      await handleRestRequest(req, res);
+      return;
+    }
     // Everything else -> 404 (minimal server; no UI/static routes).
     res.writeHead(404, { 'Content-Type': 'text/plain' });
-    res.end('Not Found. Use POST /mcp for MCP Streamable HTTP.');
+    res.end('Not Found. Use POST /mcp (MCP) or POST /api/* (REST).');
   });
 
   await server.connect(httpTransport);
   httpServer.listen(port, () => {
     console.log(`Spa MCP server (HTTP) listening on http://localhost:${port}/mcp`);
+    console.log(`REST webhook endpoints on http://localhost:${port}/api/*`);
   });
 } else {
   // Default: stdio transport (local MCP Inspector / CLI clients).

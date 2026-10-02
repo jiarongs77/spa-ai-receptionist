@@ -18,25 +18,5 @@
     "start_time": "2026-10-06T14:00:00-07:00",
     "end_time": "2026-10-06T14:50:00-07:00",
     "status": "confirmed"
-  },
-  {
-    "id": "apt-1003",
-    "customer_id": "33333333-3333-4333-8333-333333333333",
-    "customer_name": "Sofia Reyes",
-    "therapist_id": "thr-james",
-    "service_id": "svc-deep-tissue-massage",
-    "start_time": "2026-10-07T16:00:00.000-07:00",
-    "end_time": "2026-10-07T17:15:00.000-07:00",
-    "status": "confirmed"
-  },
-  {
-    "id": "apt-1004",
-    "customer_id": "3055b147-05af-469b-9c21-e231aece2635",
-    "customer_name": "Li Li",
-    "therapist_id": "thr-james",
-    "service_id": "svc-deep-tissue-massage",
-    "start_time": "2026-10-08T16:00:00.000-07:00",
-    "end_time": "2026-10-08T17:15:00.000-07:00",
-    "status": "confirmed"
   }
 ]
