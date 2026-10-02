@@ -1,0 +1,11 @@
+{
+  "name": "spa-ai-receptionist",
+  "private": true,
+  "scripts": {
+    "build": "npm --prefix mcp-server ci && npm --prefix mcp-server run build",
+    "start": "npm --prefix mcp-server run start:http"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
