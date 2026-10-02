@@ -1,0 +1,7 @@
+[edge_compute]
+func_id = "461a2a4f-1a2b-4b99-8a17-5f5e0721cda1"
+func_name = "spa-client-context"
+
+# For environment variables and secrets:
+# Use telnyx-edge secrets add <name> <value>
+# Secrets are injected as environment variables into all your functions

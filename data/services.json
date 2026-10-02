@@ -1,0 +1,23 @@
+[
+  {
+    "id": "svc-swedish-massage",
+    "name": "Swedish Massage",
+    "description": "Relaxation-focused full-body massage using long, flowing strokes.",
+    "duration_minutes": 60,
+    "price_usd": 110
+  },
+  {
+    "id": "svc-deep-tissue-massage",
+    "name": "Deep Tissue Massage",
+    "description": "Targeted pressure on deeper muscle layers to relieve chronic tension.",
+    "duration_minutes": 75,
+    "price_usd": 140
+  },
+  {
+    "id": "svc-facial",
+    "name": "Facial",
+    "description": "Customized cleansing, exfoliation, and hydration for the face.",
+    "duration_minutes": 50,
+    "price_usd": 95
+  }
+]

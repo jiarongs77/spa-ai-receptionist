@@ -1,0 +1,38 @@
+[
+  {
+    "id": "11111111-1111-4111-8111-111111111111",
+    "name": "Elena Marsh",
+    "phone": "+1-415-555-0142",
+    "email": "elena.marsh@example.com",
+    "postcode": "94110",
+    "date_of_birth": "1988-03-12",
+    "notes": "Prefers light pressure; allergic to nut oils."
+  },
+  {
+    "id": "22222222-2222-4222-8222-222222222222",
+    "name": "David Okonkwo",
+    "phone": "+1-415-555-0178",
+    "email": "david.okonkwo@example.com",
+    "postcode": "94114",
+    "date_of_birth": "1975-11-25",
+    "notes": "Recurring lower-back tightness; books deep tissue work."
+  },
+  {
+    "id": "33333333-3333-4333-8333-333333333333",
+    "name": "Sofia Reyes",
+    "phone": "+1-415-555-0199",
+    "email": "sofia.reyes@example.com",
+    "postcode": "94112",
+    "date_of_birth": "1992-07-04",
+    "notes": "Sensitive skin; requests fragrance-free facial products."
+  },
+  {
+    "id": "3055b147-05af-469b-9c21-e231aece2635",
+    "name": "Li Li",
+    "phone": "+1-415-555-0189",
+    "email": "test112@example.com",
+    "postcode": "",
+    "date_of_birth": "",
+    "notes": ""
+  }
+]
