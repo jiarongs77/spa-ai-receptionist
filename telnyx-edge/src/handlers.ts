@@ -1,0 +1,524 @@
+// REST handler implementations ported from mcp-server/src/index.ts.
+// Behavior is identical; the only differences are:
+//   - services/therapists come from bundled static data (not filesystem)
+//   - customers/appointments are read from / written to Telnyx KV
+//   - handlers are async (KV is async)
+//
+// All request/response contracts (JSON shapes, status codes, error
+// messages) match the existing mcp-server REST adapter.
+
+import { randomUUID } from 'node:crypto';
+import {
+  type Service, type Therapist, type Customer, type Appointment,
+  parseSpaInput, spaFormatISO, nextAppointmentId,
+} from './types.js';
+import { computeAvailability, isSlotFree } from './availability.js';
+import { SERVICES, THERAPISTS } from './static-data.js';
+import { readCustomers, readAppointments, writeCustomers, writeAppointments } from './kv.js';
+
+// ---------- Shared result helpers ----------
+
+export type ToolEnvelope = {
+  content: Array<{ type: string; text: string }>;
+  isError?: boolean;
+};
+
+function result(data: unknown): ToolEnvelope {
+  return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+}
+
+function err(message: string): ToolEnvelope {
+  return { content: [{ type: 'text', text: JSON.stringify({ error: message }, null, 2) }], isError: true };
+}
+
+function unwrap(env: ToolEnvelope): { status: number; body: unknown } {
+  const body = JSON.parse(env.content[0].text);
+  return { status: env.isError ? 400 : 200, body };
+}
+
+export function envelopeToResponse(env: ToolEnvelope) {
+  return unwrap(env);
+}
+
+// ---------- Shared helpers ----------
+
+function str(rec: Record<string, unknown>, key: string): string {
+  const v = rec[key];
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+function fieldStr(obj: Record<string, unknown> | undefined, key: string): string {
+  if (!obj) return '';
+  const v = obj[key];
+  return typeof v === 'string' ? v.trim() : '';
+}
+
+function isPopulatedCustomerObj(obj: unknown): obj is Record<string, unknown> {
+  if (!obj || typeof obj !== 'object') return false;
+  return Object.keys(obj as Record<string, unknown>).length > 0;
+}
+
+function findService(services: Service[], query: string): Service | undefined {
+  const q = query.trim().toLowerCase();
+  return services.find((s) => s.id.toLowerCase() === q || s.name.toLowerCase() === q);
+}
+
+function normalizePhone(phone: string): string {
+  let digits = phone.replace(/\D+/g, '');
+  if (!digits) return '';
+  if (digits.length === 11 && digits.startsWith('1')) {
+    digits = digits.slice(1);
+  }
+  return digits;
+}
+
+function buildNewCustomer(obj: Record<string, unknown>, existing: Customer[]): Customer {
+  const firstName = fieldStr(obj, 'first_name');
+  const lastName = fieldStr(obj, 'last_name');
+  const phone = fieldStr(obj, 'phone');
+  if (!firstName) throw new Error('New customer requires `first_name`.');
+  if (!lastName) throw new Error('New customer requires `last_name`.');
+  if (!phone) throw new Error('New customer requires `phone`.');
+  return {
+    id: generateUniqueCustomerId(existing),
+    name: `${firstName} ${lastName}`.trim(),
+    phone,
+    email: fieldStr(obj, 'email'),
+    postcode: fieldStr(obj, 'postcode'),
+    date_of_birth: fieldStr(obj, 'date_of_birth'),
+    notes: fieldStr(obj, 'notes'),
+  };
+}
+
+function generateUniqueCustomerId(existing: Customer[]): string {
+  const taken = new Set(existing.map((c) => c.id));
+  for (let i = 0; i < 16; i++) {
+    const id = randomUUID();
+    if (!taken.has(id)) return id;
+  }
+  return randomUUID();
+}
+
+function projectAppointment(
+  a: Appointment,
+  serviceById: Map<string, Service>,
+  therapistById: Map<string, Therapist>,
+) {
+  const service = serviceById.get(a.service_id);
+  const therapist = therapistById.get(a.therapist_id);
+  return {
+    id: a.id,
+    customer_id: a.customer_id,
+    customer_name: a.customer_name,
+    service_id: a.service_id,
+    service_name: service?.name ?? a.service_id,
+    therapist_id: a.therapist_id,
+    therapist_name: therapist?.name ?? a.therapist_id,
+    start_time: a.start_time,
+    end_time: a.end_time,
+    status: a.status,
+  };
+}
+
+// ---------- Handlers ----------
+
+export async function handleGetServiceInfo(args: Record<string, unknown>): Promise<ToolEnvelope> {
+  const query = str(args, 'service');
+  if (!query) return err('`service` is required.');
+
+  const match = findService(SERVICES, query);
+  if (!match) {
+    return result({ found: false, message: `No service matched "${query}".` });
+  }
+  return result({
+    found: true,
+    id: match.id,
+    name: match.name,
+    description: match.description,
+    duration_minutes: match.duration_minutes,
+    price_usd: match.price_usd,
+  });
+}
+
+export async function handleCheckAvailability(args: Record<string, unknown>): Promise<ToolEnvelope> {
+  const serviceQuery = str(args, 'service');
+  const dateStr = str(args, 'date');
+  const therapistId = str(args, 'therapist_id');
+
+  if (!serviceQuery || !dateStr) return err('`service` and `date` are required.');
+
+  const service = findService(SERVICES, serviceQuery);
+  if (!service) return err(`No service matched "${serviceQuery}".`);
+
+  let date: Date;
+  try {
+    date = parseSpaInput(dateStr, 'date');
+  } catch (e) {
+    return err(e instanceof Error ? e.message : `Invalid date: "${dateStr}".`);
+  }
+
+  const appointments = await readAppointments();
+  const slots = computeAvailability(service, date, THERAPISTS, appointments, therapistId || undefined);
+
+  if (therapistId) {
+    const t = THERAPISTS.find((x) => x.id === therapistId);
+    if (!t) return err(`No therapist with id "${therapistId}".`);
+    if (!t.service_ids.includes(service.id)) {
+      return result({
+        service: { id: service.id, name: service.name },
+        therapist: { id: t.id, name: t.name },
+        available: false,
+        message: `${t.name} does not offer ${service.name}.`,
+        slots: [],
+      });
+    }
+  }
+
+  return result({
+    service: { id: service.id, name: service.name, duration_minutes: service.duration_minutes },
+    date: dateStr,
+    available: slots.length > 0,
+    slots,
+  });
+}
+
+export async function handleCreateBooking(args: Record<string, unknown>): Promise<ToolEnvelope> {
+  const customerId = str(args, 'customer_id');
+  const customerObj = args.customer as Record<string, unknown> | undefined;
+  const serviceQuery = str(args, 'service');
+  const therapistId = str(args, 'therapist_id');
+  const startTimeStr = str(args, 'start_time');
+
+  if (!serviceQuery || !startTimeStr) return err('`service` and `start_time` are required.');
+
+  const customerIdProvided = !!customerId;
+  const customerObjProvided = isPopulatedCustomerObj(customerObj);
+
+  if (customerIdProvided && customerObjProvided) {
+    return err('Supply exactly one of `customer_id` or `customer`, not both.');
+  }
+  if (!customerIdProvided && !customerObjProvided) {
+    return err('Supply exactly one of `customer_id` (existing customer) or `customer` (new customer).');
+  }
+
+  if (customerObjProvided) {
+    const fn = fieldStr(customerObj, 'first_name');
+    const ln = fieldStr(customerObj, 'last_name');
+    if (!fn) return err('`customer.first_name` is required.');
+    if (!ln) return err('`customer.last_name` is required.');
+  }
+
+  const service = findService(SERVICES, serviceQuery);
+  if (!service) return err(`No service matched "${serviceQuery}".`);
+
+  let start: Date;
+  try {
+    start = parseSpaInput(startTimeStr, 'start_time');
+  } catch (e) {
+    return err(e instanceof Error ? e.message : `Invalid start_time: "${startTimeStr}".`);
+  }
+  const end = new Date(start.getTime() + service.duration_minutes * 60_000);
+
+  const appointments = await readAppointments();
+
+  // --- Therapist selection ---
+  let selectedTherapist: Therapist | undefined;
+  if (therapistId) {
+    const t = THERAPISTS.find((x) => x.id === therapistId);
+    if (!t) return err(`No therapist with id "${therapistId}".`);
+    if (!t.service_ids.includes(service.id)) {
+      return err(`${t.name} does not offer ${service.name}.`);
+    }
+    if (!isSlotFree(service, t, start, end, appointments)) {
+      return result({
+        success: false,
+        message: `The requested therapist (${t.name}) is not available at the requested time (outside working hours or conflicts with an existing confirmed appointment).`,
+      });
+    }
+    selectedTherapist = t;
+  } else {
+    for (const t of THERAPISTS) {
+      if (!t.service_ids.includes(service.id)) continue;
+      if (isSlotFree(service, t, start, end, appointments)) {
+        selectedTherapist = t;
+        break;
+      }
+    }
+    if (!selectedTherapist) {
+      return result({
+        success: false,
+        message: 'No therapist qualified for this service is available at the requested time.',
+      });
+    }
+  }
+
+  // --- Resolve customer ---
+  let customer: Customer;
+  if (customerId) {
+    const customers = await readCustomers();
+    const found = customers.find((c) => c.id === customerId);
+    if (!found) return err(`No customer with id "${customerId}".`);
+    customer = found;
+  } else {
+    const customers = await readCustomers();
+    const phone = fieldStr(customerObj!, 'phone');
+    const normalizedPhone = normalizePhone(phone);
+    const matched = customers.filter(
+      (c) => normalizePhone(c.phone) === normalizedPhone && normalizedPhone !== '',
+    );
+    if (matched.length === 1) {
+      customer = matched[0];
+    } else if (matched.length > 1) {
+      return err(`Multiple customers share phone "${phone}". Provide the specific \`customer_id\` to target one.`);
+    } else {
+      if (!phone) return err('`customer.phone` is required for a new customer booking.');
+      customer = buildNewCustomer(customerObj!, customers);
+      customers.push(customer);
+      await writeCustomers(customers);
+    }
+  }
+
+  const newAppt: Appointment = {
+    id: nextAppointmentId(appointments),
+    customer_id: customer.id,
+    customer_name: customer.name,
+    therapist_id: selectedTherapist.id,
+    service_id: service.id,
+    start_time: spaFormatISO(start),
+    end_time: spaFormatISO(end),
+    status: 'confirmed',
+  };
+
+  appointments.push(newAppt);
+  await writeAppointments(appointments);
+
+  return result({
+    success: true,
+    appointment_id: newAppt.id,
+    customer_id: customer.id,
+    service: { id: service.id, name: service.name },
+    therapist: { id: selectedTherapist.id, name: selectedTherapist.name },
+    start_time: newAppt.start_time,
+    end_time: newAppt.end_time,
+    status: newAppt.status,
+  });
+}
+
+export async function handleGetAppointment(args: Record<string, unknown>): Promise<ToolEnvelope> {
+  const phone = str(args, 'phone');
+  const appointmentId = str(args, 'appointment_id');
+  const customerId = str(args, 'customer_id');
+
+  if (!phone && !appointmentId && !customerId) {
+    return err('Provide `phone` (preferred), or `appointment_id`/`customer_id` for internal lookup.');
+  }
+
+  const appointments = await readAppointments();
+  const customers = await readCustomers();
+  const serviceById = new Map(SERVICES.map((s) => [s.id, s] as const));
+  const therapistById = new Map(THERAPISTS.map((t) => [t.id, t] as const));
+
+  if (appointmentId || customerId) {
+    const matches = appointments.filter((a) => {
+      if (appointmentId) return a.id === appointmentId;
+      return a.customer_id === customerId;
+    });
+    if (matches.length === 0) {
+      return result({
+        found: false,
+        message: appointmentId
+          ? `No appointment with id "${appointmentId}".`
+          : `No appointments found for customer_id "${customerId}".`,
+      });
+    }
+    const projected = matches.map((a) => projectAppointment(a, serviceById, therapistById));
+    return result({ found: true, count: projected.length, appointments: projected });
+  }
+
+  // By phone (primary caller-facing lookup).
+  const normalized = normalizePhone(phone);
+  const matched = customers.filter(
+    (c) => normalizePhone(c.phone) === normalized && normalized !== '',
+  );
+
+  if (matched.length === 0) {
+    return result({ found: false, message: `No customer with phone "${phone}".` });
+  }
+  if (matched.length === 1) {
+    const cus = matched[0];
+    const appts = appointments.filter((a) => a.customer_id === cus.id);
+    if (appts.length === 0) {
+      return result({ found: false, message: `No appointments found for phone "${phone}".` });
+    }
+    const projected = appts.map((a) => projectAppointment(a, serviceById, therapistById));
+    return result({ found: true, count: projected.length, appointments: projected });
+  }
+  return result({
+    found: true,
+    ambiguous: true,
+    message: `Multiple customers share phone "${phone}". Provide the specific \`customer_id\` to target one.`,
+    matching_customers: matched.map((c) => ({ customer_id: c.id, name: c.name })),
+    count: matched.length,
+  });
+}
+
+export async function handleRescheduleBooking(args: Record<string, unknown>): Promise<ToolEnvelope> {
+  const firstName = str(args, 'first_name');
+  const lastName = str(args, 'last_name');
+  const phone = str(args, 'phone');
+  const newStartStr = str(args, 'new_start_time');
+  const newTherapistId = str(args, 'new_therapist_id');
+  const serviceSelector = str(args, 'service');
+  const currentStartStr = str(args, 'current_start_time');
+
+  if (!firstName || !lastName || !phone || !newStartStr) {
+    return err('`first_name`, `last_name`, `phone`, and `new_start_time` are required.');
+  }
+
+  const fullName = `${firstName} ${lastName}`.trim();
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) {
+    return result({ rescheduled: false, message: `No customer found for phone "${phone}".` });
+  }
+
+  const customers = await readCustomers();
+  const matchedCustomers = customers.filter(
+    (c) => c.name === fullName && normalizePhone(c.phone) === normalizedPhone,
+  );
+  if (matchedCustomers.length === 0) {
+    return result({ rescheduled: false, message: `No customer found for "${fullName}" with phone "${phone}".` });
+  }
+  if (matchedCustomers.length > 1) {
+    return result({
+      rescheduled: false,
+      ambiguous: true,
+      message: `Multiple customer records match "${fullName}" + phone "${phone}". This should not happen with unique phone numbers; please contact support.`,
+      matching_customers: matchedCustomers.map((c) => ({ customer_id: c.id, name: c.name })),
+      count: matchedCustomers.length,
+    });
+  }
+  const customer = matchedCustomers[0];
+
+  const appointments = await readAppointments();
+  const serviceById = new Map(SERVICES.map((s) => [s.id, s] as const));
+  const therapistById = new Map(THERAPISTS.map((t) => [t.id, t] as const));
+
+  let upcoming = appointments.filter(
+    (a) => a.customer_id === customer.id && a.status === 'confirmed',
+  );
+
+  if (upcoming.length === 0) {
+    return result({ rescheduled: false, message: `No upcoming confirmed appointments found for "${fullName}".` });
+  }
+
+  // --- Narrow by optional selectors ---
+  if (upcoming.length > 1 && (serviceSelector || currentStartStr)) {
+    if (serviceSelector) {
+      const svc = findService(SERVICES, serviceSelector);
+      if (!svc) return result({ rescheduled: false, message: `No service matched "${serviceSelector}".` });
+      upcoming = upcoming.filter((a) => a.service_id === svc.id);
+    }
+    if (currentStartStr) {
+      let target: Date;
+      try {
+        target = parseSpaInput(currentStartStr, 'current_start_time');
+      } catch {
+        return result({ rescheduled: false, message: `Invalid current_start_time: "${currentStartStr}".` });
+      }
+      upcoming = upcoming.filter(
+        (a) => parseSpaInput(a.start_time, 'appointment start_time').getTime() === target.getTime(),
+      );
+    }
+    if (upcoming.length === 0) {
+      return result({
+        rescheduled: false,
+        message: `No upcoming appointment found for "${fullName}" matching the provided service/current_start_time selectors.`,
+      });
+    }
+    if (upcoming.length > 1) {
+      return result({
+        rescheduled: false,
+        ambiguous: true,
+        message: `Multiple upcoming appointments for "${fullName}" match the provided selectors. Please clarify which appointment to reschedule.`,
+        matching_appointments: upcoming.map((a) => projectAppointment(a, serviceById, therapistById)),
+        count: upcoming.length,
+      });
+    }
+  } else if (upcoming.length > 1) {
+    return result({
+      rescheduled: false,
+      ambiguous: true,
+      message: `Multiple upcoming appointments found for "${fullName}". Please specify \`service\` and/or \`current_start_time\` to identify which appointment to reschedule.`,
+      matching_appointments: upcoming.map((a) => projectAppointment(a, serviceById, therapistById)),
+      count: upcoming.length,
+    });
+  }
+
+  const existing = upcoming[0];
+  const idx = appointments.findIndex((a) => a.id === existing.id);
+
+  const service = SERVICES.find((s) => s.id === existing.service_id);
+  if (!service) return err(`Service "${existing.service_id}" no longer exists.`);
+
+  let start: Date;
+  try {
+    start = parseSpaInput(newStartStr, 'new_start_time');
+  } catch (e) {
+    return err(e instanceof Error ? e.message : `Invalid new_start_time: "${newStartStr}".`);
+  }
+  const end = new Date(start.getTime() + service.duration_minutes * 60_000);
+
+  // --- Therapist selection ---
+  let selected: Therapist | undefined;
+  if (newTherapistId) {
+    const t = THERAPISTS.find((x) => x.id === newTherapistId);
+    if (!t) return err(`No therapist with id "${newTherapistId}".`);
+    if (!t.service_ids.includes(service.id)) return err(`${t.name} does not offer ${service.name}.`);
+    if (!isSlotFree(service, t, start, end, appointments, existing.id)) {
+      return result({
+        rescheduled: false,
+        message: `The requested therapist (${t.name}) is not available at the requested time (outside working hours or conflicts with another confirmed appointment).`,
+      });
+    }
+    selected = t;
+  } else {
+    const candidates = [
+      ...THERAPISTS.filter((t) => t.id === existing.therapist_id),
+      ...THERAPISTS.filter((t) => t.id !== existing.therapist_id && t.service_ids.includes(service.id)),
+    ];
+    for (const t of candidates) {
+      if (!t.service_ids.includes(service.id)) continue;
+      if (isSlotFree(service, t, start, end, appointments, existing.id)) {
+        selected = t;
+        break;
+      }
+    }
+    if (!selected) {
+      return result({
+        rescheduled: false,
+        message: 'No therapist qualified for this service is available at the requested time (existing therapist unavailable and no other qualified therapist free).',
+      });
+    }
+  }
+
+  const updated: Appointment = {
+    id: existing.id,
+    customer_id: existing.customer_id,
+    customer_name: existing.customer_name,
+    service_id: existing.service_id,
+    therapist_id: selected.id,
+    start_time: spaFormatISO(start),
+    end_time: spaFormatISO(end),
+    status: 'confirmed',
+  };
+
+  appointments[idx] = updated;
+  await writeAppointments(appointments);
+
+  return result({
+    rescheduled: true,
+    appointment: updated,
+    service: { id: service.id, name: service.name },
+    therapist: { id: selected.id, name: selected.name },
+  });
+}

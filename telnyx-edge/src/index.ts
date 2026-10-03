@@ -1,0 +1,138 @@
+import * as http from 'node:http';
+import { env } from '@telnyx/edge-runtime';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import {
+  handleGetServiceInfo, handleCheckAvailability, handleCreateBooking,
+  handleGetAppointment, handleRescheduleBooking,
+  envelopeToResponse, type ToolEnvelope,
+} from './handlers.js';
+
+// ---------- REST route table ----------
+// Each route maps to one async handler returning a ToolEnvelope. The server
+// unwraps the envelope to a plain JSON HTTP response (200 / 400).
+
+const ROUTES: Record<string, (args: Record<string, unknown>) => Promise<ToolEnvelope>> = {
+  '/api/get-service-info': handleGetServiceInfo,
+  '/api/check-availability': handleCheckAvailability,
+  '/api/create-booking': handleCreateBooking,
+  '/api/get-appointment': handleGetAppointment,
+  '/api/reschedule-booking': handleRescheduleBooking,
+};
+
+function sendJson(res: ServerResponse, status: number, body: unknown): void {
+  const json = JSON.stringify(body, null, 2);
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(json);
+}
+
+async function readJsonObject(req: IncomingMessage): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', (chunk: Buffer) => { raw += chunk.toString(); });
+    req.on('end', () => {
+      if (!raw) return resolve({});
+      try {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+          return reject(new Error('Request body must be a JSON object.'));
+        }
+        resolve(parsed as Record<string, unknown>);
+      } catch {
+        reject(new Error('Invalid JSON body.'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+// Structured JSON logging. NEVER log PII (phone, name, email, DOB, notes).
+function logApi(path: string, success: boolean, durationMs: number): void {
+  console.log(JSON.stringify({
+    event: 'api_request',
+    path,
+    success,
+    duration_ms: durationMs,
+  }));
+}
+
+// ---------- HTTP server ----------
+
+const server = http.createServer(async (req, res) => {
+  // Preserve /health.
+  if (req.url === '/health' || req.url?.startsWith('/health/')) {
+    res.writeHead(200);
+    res.end();
+    return;
+  }
+
+  // Preserve /kv-test.
+  if (req.url === '/kv-test' && req.method === 'POST') {
+    const startedAt = Date.now();
+    try {
+      await env.SPA_DATA.put(
+        'edge-test',
+        JSON.stringify({ message: 'Spa House KV is working', timestamp: new Date().toISOString() }),
+      );
+      const value = await env.SPA_DATA.get<{ message: string; timestamp: string }>('edge-test', { type: 'json' });
+      const durationMs = Date.now() - startedAt;
+      console.log(JSON.stringify({ event: 'kv_test', success: true, duration_ms: durationMs }));
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, value, duration_ms: durationMs }));
+      return;
+    } catch (error) {
+      const durationMs = Date.now() - startedAt;
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(JSON.stringify({ event: 'kv_test', success: false, duration_ms: durationMs, error: msg }));
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: msg }));
+      return;
+    }
+  }
+
+  // REST /api/* routes.
+  if (req.method === 'POST' && req.url && req.url.startsWith('/api/')) {
+    const path = req.url;
+    const handler = ROUTES[path];
+    const startedAt = Date.now();
+
+    if (!handler) {
+      logApi(path, false, Date.now() - startedAt);
+      sendJson(res, 404, { error: `Unknown API endpoint: ${path}` });
+      return;
+    }
+
+    let args: Record<string, unknown>;
+    try {
+      args = await readJsonObject(req);
+    } catch (e) {
+      const durationMs = Date.now() - startedAt;
+      logApi(path, false, durationMs);
+      sendJson(res, 400, { error: e instanceof Error ? e.message : 'Invalid request body.' });
+      return;
+    }
+
+    try {
+      const env = await handler(args);
+      const { status, body } = envelopeToResponse(env);
+      const durationMs = Date.now() - startedAt;
+      logApi(path, status < 400, durationMs);
+      sendJson(res, status, body);
+      return;
+    } catch (e) {
+      const durationMs = Date.now() - startedAt;
+      logApi(path, false, durationMs);
+      // Unexpected throw -> 500 with a clean message; PII is never logged.
+      sendJson(res, 500, { error: e instanceof Error ? e.message : 'Request failed.' });
+      return;
+    }
+  }
+
+  // Default.
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ message: 'Spa House Telnyx Edge' }));
+});
+
+const port = process.env.PORT || 8080;
+server.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
