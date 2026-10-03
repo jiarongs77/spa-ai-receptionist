@@ -3,10 +3,10 @@
     "id": "apt-1001",
     "customer_id": "22222222-2222-4222-8222-222222222222",
     "customer_name": "David Okonkwo",
-    "therapist_id": "thr-maya",
     "service_id": "svc-deep-tissue-massage",
-    "start_time": "2026-10-05T10:00:00-07:00",
-    "end_time": "2026-10-05T11:15:00-07:00",
+    "therapist_id": "thr-maya",
+    "start_time": "2026-10-06T10:00:00.000-07:00",
+    "end_time": "2026-10-06T11:15:00.000-07:00",
     "status": "confirmed"
   },
   {
@@ -17,6 +17,16 @@
     "service_id": "svc-facial",
     "start_time": "2026-10-06T14:00:00-07:00",
     "end_time": "2026-10-06T14:50:00-07:00",
+    "status": "confirmed"
+  },
+  {
+    "id": "apt-1003",
+    "customer_id": "22222222-2222-4222-8222-222222222222",
+    "customer_name": "David Okonkwo",
+    "service_id": "svc-facial",
+    "therapist_id": "thr-james",
+    "start_time": "2026-10-08T10:00:00.000-07:00",
+    "end_time": "2026-10-08T10:50:00.000-07:00",
     "status": "confirmed"
   }
 ]

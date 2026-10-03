@@ -167,10 +167,12 @@ const tools = [
     description:
       'Reschedule an existing confirmed appointment to a new start time. ' +
       'The caller identifies themselves with first_name + last_name + ' +
-      'phone (all required); the server resolves the customer, finds ' +
-      'their upcoming confirmed appointment, and reschedules it. If the ' +
-      'customer has multiple upcoming appointments, returns them for the ' +
-      'caller to disambiguate (does NOT modify any). Preserves the ' +
+      'phone (all required). If the customer has exactly one upcoming ' +
+      'confirmed appointment, it is rescheduled directly. If they have ' +
+      'multiple, the optional `service` and/or `current_start_time` ' +
+      'selectors are used to identify the intended appointment. If the ' +
+      'selectors still match multiple (or zero) appointments, returns them ' +
+      'for clarification without modifying anything. Preserves the ' +
       'original service, customer, appointment ID, and "confirmed" ' +
       'status. `new_therapist_id` is OPTIONAL; if omitted, prefers the ' +
       'existing therapist when available, otherwise auto-selects another ' +
@@ -188,6 +190,17 @@ const tools = [
         new_start_time: {
           type: 'string',
           description: 'New start time. Accepts ISO or natural forms.',
+        },
+        service: {
+          type: 'string',
+          description: 'Optional. Service ID or name to identify the intended ' +
+            'appointment when the customer has multiple upcoming appointments.',
+        },
+        current_start_time: {
+          type: 'string',
+          description: 'Optional. The appointment\'s current start time (ISO ' +
+            'or natural) to identify it when the customer has multiple. The ' +
+            'wall-clock time is matched in spa timezone.',
         },
         new_therapist_id: {
           type: 'string',
@@ -634,10 +647,11 @@ function handleRescheduleBooking(args: Record<string, unknown>) {
 
   // Find this customer's upcoming confirmed appointments.
   const appointments = loadAppointments();
-  const serviceById = new Map(loadServices().map((s) => [s.id, s] as const));
+  const services = loadServices();
+  const serviceById = new Map(services.map((s) => [s.id, s] as const));
   const therapistById = new Map(loadTherapists().map((t) => [t.id, t] as const));
 
-  const upcoming = appointments.filter(
+  let upcoming = appointments.filter(
     (a) => a.customer_id === customer.id && a.status === 'confirmed',
   );
 
@@ -648,16 +662,75 @@ function handleRescheduleBooking(args: Record<string, unknown>) {
     });
   }
 
-  if (upcoming.length > 1) {
-    // Do NOT arbitrarily reschedule one. Return the matching appointments
-    // with non-sensitive details so the caller can identify the intended
-    // appointment. Do not modify any appointment.
+  // --- Narrow by optional selectors -----------------------------------
+  // When the customer has multiple upcoming appointments, use `service`
+  // and/or `current_start_time` (whichever were provided) to identify the
+  // intended one. Each selector is applied independently and we keep only
+  // appointments matching ALL provided selectors.
+  const serviceSelector = str(args, 'service');
+  const currentStartStr = str(args, 'current_start_time');
+
+  if (upcoming.length > 1 && (serviceSelector || currentStartStr)) {
+    if (serviceSelector) {
+      const svc = findService(services, serviceSelector);
+      if (!svc) {
+        return toolResult({
+          rescheduled: false,
+          message: `No service matched "${serviceSelector}".`,
+        });
+      }
+      upcoming = upcoming.filter((a) => a.service_id === svc.id);
+    }
+    if (currentStartStr) {
+      // Match the appointment's current start time in spa timezone. Parse
+      // the selector the same way we parse all datetimes, then compare the
+      // instants (so wall-clock formatting differences don't matter).
+      let target: Date;
+      try {
+        target = parseSpaInput(currentStartStr, 'current_start_time');
+      } catch {
+        return toolResult({
+          rescheduled: false,
+          message: `Invalid current_start_time: "${currentStartStr}".`,
+        });
+      }
+      upcoming = upcoming.filter(
+        (a) => parseSpaInput(a.start_time, 'appointment start_time').getTime() === target.getTime(),
+      );
+    }
+
+    if (upcoming.length === 0) {
+      return toolResult({
+        rescheduled: false,
+        message:
+          `No upcoming appointment found for "${fullName}" matching the ` +
+          'provided service/current_start_time selectors.',
+      });
+    }
+    if (upcoming.length > 1) {
+      return toolResult({
+        rescheduled: false,
+        ambiguous: true,
+        message:
+          `Multiple upcoming appointments for "${fullName}" match the ` +
+          'provided selectors. Please clarify which appointment to reschedule.',
+        matching_appointments: upcoming.map((a) =>
+          projectAppointment(a, serviceById, therapistById),
+        ),
+        count: upcoming.length,
+      });
+    }
+    // Exactly one after narrowing -> fall through to reschedule it.
+  } else if (upcoming.length > 1) {
+    // No selectors provided. Do NOT arbitrarily reschedule one. Return the
+    // matching appointments for the caller to identify the intended one.
     return toolResult({
       rescheduled: false,
       ambiguous: true,
       message:
         `Multiple upcoming appointments found for "${fullName}". Please ` +
-        'specify which appointment to reschedule.',
+        'specify `service` and/or `current_start_time` to identify which ' +
+        'appointment to reschedule.',
       matching_appointments: upcoming.map((a) =>
         projectAppointment(a, serviceById, therapistById),
       ),
@@ -668,7 +741,6 @@ function handleRescheduleBooking(args: Record<string, unknown>) {
   const existing = upcoming[0];
   const idx = appointments.findIndex((a) => a.id === existing.id);
 
-  const services = loadServices();
   const service = services.find((s) => s.id === existing.service_id);
   if (!service) {
     return toolError(`Service "${existing.service_id}" no longer exists.`);
