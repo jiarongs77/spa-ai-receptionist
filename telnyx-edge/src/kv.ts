@@ -13,6 +13,31 @@ import type { Customer, Appointment } from './types.js';
 
 // Bundled fixture snapshot for first-run seeding. Mirrors the current
 // root data/customers.json and data/appointments.json.
+
+/** Minimal KV interface used by the helpers (subset of Telnyx KvNamespace). */
+export interface SpaKv {
+  get<T>(key: string, opts: { type: 'json' }): Promise<T | null>;
+  put(key: string, value: string): Promise<void>;
+}
+
+// The KV instance used in production is env.SPA_DATA. We resolve it lazily
+// on first use so that simply importing this module in a test (where the
+// Telnyx runtime/proxy may not be functional) does not trigger a real
+// `env.SPA_DATA` access. Tests override the instance via
+// `__setKvForTests()` before any read/write.
+let _kvExplicit: SpaKv | undefined;
+
+/** Test seam: override the KV instance. Production code never calls this. */
+export function __setKvForTests(kv: SpaKv): void {
+  _kvExplicit = kv;
+}
+
+function kv(): SpaKv {
+  if (_kvExplicit) return _kvExplicit;
+  // Lazy: only touch env.SPA_DATA on first real read/write in production.
+  _kvExplicit = env.SPA_DATA as unknown as SpaKv;
+  return _kvExplicit;
+}
 const SEED_CUSTOMERS: Customer[] = [
   {
     id: '11111111-1111-4111-8111-111111111111',
@@ -72,26 +97,26 @@ const SEED_APPOINTMENTS: Appointment[] = [
  * the seeded data. Subsequent reads return whatever is in KV.
  */
 export async function readCustomers(): Promise<Customer[]> {
-  const existing = await env.SPA_DATA.get<Customer[]>('customers', { type: 'json' });
+  const existing = await kv().get<Customer[]>('customers', { type: 'json' });
   if (existing !== null) return existing;
-  await env.SPA_DATA.put('customers', JSON.stringify(SEED_CUSTOMERS));
+  await kv().put('customers', JSON.stringify(SEED_CUSTOMERS));
   return SEED_CUSTOMERS;
 }
 
 /** Read appointments from KV (same initialization semantics as customers). */
 export async function readAppointments(): Promise<Appointment[]> {
-  const existing = await env.SPA_DATA.get<Appointment[]>('appointments', { type: 'json' });
+  const existing = await kv().get<Appointment[]>('appointments', { type: 'json' });
   if (existing !== null) return existing;
-  await env.SPA_DATA.put('appointments', JSON.stringify(SEED_APPOINTMENTS));
+  await kv().put('appointments', JSON.stringify(SEED_APPOINTMENTS));
   return SEED_APPOINTMENTS;
 }
 
 /** Write customers to KV (overwrites the key). */
 export async function writeCustomers(customers: Customer[]): Promise<void> {
-  await env.SPA_DATA.put('customers', JSON.stringify(customers));
+  await kv().put('customers', JSON.stringify(customers));
 }
 
 /** Write appointments to KV (overwrites the key). */
 export async function writeAppointments(appointments: Appointment[]): Promise<void> {
-  await env.SPA_DATA.put('appointments', JSON.stringify(appointments));
+  await kv().put('appointments', JSON.stringify(appointments));
 }

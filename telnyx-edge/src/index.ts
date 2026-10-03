@@ -5,6 +5,7 @@ import {
   handleGetServiceInfo, handleCheckAvailability, handleCreateBooking,
   handleGetAppointment, handleRescheduleBooking,
   envelopeToResponse, type ToolEnvelope,
+  handleDynamicContext,
 } from './handlers.js';
 
 // ---------- REST route table ----------
@@ -89,6 +90,72 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // Dynamic Webhook Variables (/dynamic-context).
+  // Telnyx AI Assistant calls this at conversation initialization with the
+  // caller's phone. We return dynamic_variables for the assistant; never PII
+  // other than customer_first_name. Logs contain no PII.
+  if (req.method === 'POST' && req.url === '/dynamic-context') {
+    const startedAt = Date.now();
+    let payload: Record<string, unknown>;
+    try {
+      payload = await readJsonObject(req);
+    } catch {
+      // Invalid/empty body -> safe defaults, logged as success (200).
+      const durationMs = Date.now() - startedAt;
+      console.log(JSON.stringify({
+        event: 'dynamic_context',
+        success: true,
+        returning_customer: false,
+        has_appointments: false,
+        duration_ms: durationMs,
+      }));
+      sendJson(res, 200, { dynamic_variables: {
+        returning_customer: false,
+        customer_first_name: '',
+        has_appointments: false,
+        appointment_count: 0,
+        upcoming_service: '',
+        upcoming_appointment_time: '',
+        suggested_workflow: 'booking',
+      }});
+      return;
+    }
+
+    try {
+      const { dynamic_variables } = await handleDynamicContext(payload);
+      const durationMs = Date.now() - startedAt;
+      console.log(JSON.stringify({
+        event: 'dynamic_context',
+        success: true,
+        returning_customer: dynamic_variables.returning_customer === true,
+        has_appointments: dynamic_variables.has_appointments === true,
+        duration_ms: durationMs,
+      }));
+      sendJson(res, 200, { dynamic_variables });
+      return;
+    } catch (e) {
+      // Never fail the webhook; return safe defaults.
+      const durationMs = Date.now() - startedAt;
+      console.log(JSON.stringify({
+        event: 'dynamic_context',
+        success: false,
+        returning_customer: false,
+        has_appointments: false,
+        duration_ms: durationMs,
+      }));
+      sendJson(res, 200, { dynamic_variables: {
+        returning_customer: false,
+        customer_first_name: '',
+        has_appointments: false,
+        appointment_count: 0,
+        upcoming_service: '',
+        upcoming_appointment_time: '',
+        suggested_workflow: 'booking',
+      }});
+      return;
+    }
+  }
+
   // REST /api/* routes.
   if (req.method === 'POST' && req.url && req.url.startsWith('/api/')) {
     const path = req.url;
@@ -115,12 +182,36 @@ const server = http.createServer(async (req, res) => {
       const env = await handler(args);
       const { status, body } = envelopeToResponse(env);
       const durationMs = Date.now() - startedAt;
-      logApi(path, status < 400, durationMs);
+
+      // Structured logging. For create-booking, use the discriminator set
+      // by the handler so we can distinguish created / idempotent replay /
+      // rejected. No PII is logged (status/path/outcome/duration only).
+      if (path === '/api/create-booking' && env.bookingOutcome) {
+        console.log(JSON.stringify({
+          event: env.bookingOutcome,
+          path,
+          success: status < 400,
+          duration_ms: durationMs,
+        }));
+      } else {
+        logApi(path, status < 400, durationMs);
+      }
+
       sendJson(res, status, body);
       return;
     } catch (e) {
       const durationMs = Date.now() - startedAt;
-      logApi(path, false, durationMs);
+      // Unexpected throw on create-booking -> logged as booking_rejected.
+      if (path === '/api/create-booking') {
+        console.log(JSON.stringify({
+          event: 'booking_rejected',
+          path,
+          success: false,
+          duration_ms: durationMs,
+        }));
+      } else {
+        logApi(path, false, durationMs);
+      }
       // Unexpected throw -> 500 with a clean message; PII is never logged.
       sendJson(res, 500, { error: e instanceof Error ? e.message : 'Request failed.' });
       return;

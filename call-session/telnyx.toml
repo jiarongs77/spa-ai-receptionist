@@ -1,0 +1,11 @@
+name = "call-session"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+[[actors]]
+binding = "COUNTER"
+type = "Counter"
+
+[edge_compute]
+func_id = "3fb08cf5-de78-4f49-90bd-18db82d4e8cd"
+func_name = "call-session"

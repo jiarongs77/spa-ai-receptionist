@@ -21,6 +21,9 @@ import { readCustomers, readAppointments, writeCustomers, writeAppointments } fr
 export type ToolEnvelope = {
   content: Array<{ type: string; text: string }>;
   isError?: boolean;
+  // Optional discriminator for structured logging. Only set by handlers
+  // that the server treats specially (currently create-booking).
+  bookingOutcome?: 'booking_created' | 'booking_idempotent_replay' | 'booking_rejected';
 };
 
 function result(data: unknown): ToolEnvelope {
@@ -218,41 +221,11 @@ export async function handleCreateBooking(args: Record<string, unknown>): Promis
     return err(e instanceof Error ? e.message : `Invalid start_time: "${startTimeStr}".`);
   }
   const end = new Date(start.getTime() + service.duration_minutes * 60_000);
-
-  const appointments = await readAppointments();
-
-  // --- Therapist selection ---
-  let selectedTherapist: Therapist | undefined;
-  if (therapistId) {
-    const t = THERAPISTS.find((x) => x.id === therapistId);
-    if (!t) return err(`No therapist with id "${therapistId}".`);
-    if (!t.service_ids.includes(service.id)) {
-      return err(`${t.name} does not offer ${service.name}.`);
-    }
-    if (!isSlotFree(service, t, start, end, appointments)) {
-      return result({
-        success: false,
-        message: `The requested therapist (${t.name}) is not available at the requested time (outside working hours or conflicts with an existing confirmed appointment).`,
-      });
-    }
-    selectedTherapist = t;
-  } else {
-    for (const t of THERAPISTS) {
-      if (!t.service_ids.includes(service.id)) continue;
-      if (isSlotFree(service, t, start, end, appointments)) {
-        selectedTherapist = t;
-        break;
-      }
-    }
-    if (!selectedTherapist) {
-      return result({
-        success: false,
-        message: 'No therapist qualified for this service is available at the requested time.',
-      });
-    }
-  }
+  const startInstantMs = start.getTime();
 
   // --- Resolve customer ---
+  // Resolve the customer first (before therapist selection / conflict check)
+  // so we can detect an idempotent replay of the SAME booking request.
   let customer: Customer;
   if (customerId) {
     const customers = await readCustomers();
@@ -278,6 +251,77 @@ export async function handleCreateBooking(args: Record<string, unknown>): Promis
     }
   }
 
+  const appointments = await readAppointments();
+
+  // --- Idempotency check ---
+  // Before normal slot-conflict rejection, check whether an existing
+  // confirmed appointment already represents THIS booking request (same
+  // resolved customer, same service, same requested start instant). The
+  // customer's own first successful booking is what makes a retry appear
+  // "unavailable", so we detect and short-circuit that case here.
+  const replay = appointments.find(
+    (a) =>
+      a.status === 'confirmed' &&
+      a.customer_id === customer.id &&
+      a.service_id === service.id &&
+      parseSpaInput(a.start_time, 'appointment start_time').getTime() === startInstantMs,
+  );
+  if (replay) {
+    const t = THERAPISTS.find((x) => x.id === replay.therapist_id);
+    return {
+      content: [{ type: 'text', text: JSON.stringify({
+        success: true,
+        appointment_id: replay.id,
+        customer_id: customer.id,
+        service: { id: service.id, name: service.name },
+        therapist: { id: replay.therapist_id, name: t?.name ?? replay.therapist_id },
+        start_time: replay.start_time,
+        end_time: replay.end_time,
+        status: replay.status,
+        already_existed: true,
+      }, null, 2) }],
+      bookingOutcome: 'booking_idempotent_replay',
+    };
+  }
+
+  // --- Therapist selection ---
+  // Genuine new booking: validate availability and select a therapist.
+  let selectedTherapist: Therapist | undefined;
+  if (therapistId) {
+    const t = THERAPISTS.find((x) => x.id === therapistId);
+    if (!t) return err(`No therapist with id "${therapistId}".`);
+    if (!t.service_ids.includes(service.id)) {
+      return err(`${t.name} does not offer ${service.name}.`);
+    }
+    if (!isSlotFree(service, t, start, end, appointments)) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({
+          success: false,
+          message: `The requested therapist (${t.name}) is not available at the requested time (outside working hours or conflicts with an existing confirmed appointment).`,
+        }, null, 2) }],
+        bookingOutcome: 'booking_rejected',
+      };
+    }
+    selectedTherapist = t;
+  } else {
+    for (const t of THERAPISTS) {
+      if (!t.service_ids.includes(service.id)) continue;
+      if (isSlotFree(service, t, start, end, appointments)) {
+        selectedTherapist = t;
+        break;
+      }
+    }
+    if (!selectedTherapist) {
+      return {
+        content: [{ type: 'text', text: JSON.stringify({
+          success: false,
+          message: 'No therapist qualified for this service is available at the requested time.',
+        }, null, 2) }],
+        bookingOutcome: 'booking_rejected',
+      };
+    }
+  }
+
   const newAppt: Appointment = {
     id: nextAppointmentId(appointments),
     customer_id: customer.id,
@@ -292,16 +336,20 @@ export async function handleCreateBooking(args: Record<string, unknown>): Promis
   appointments.push(newAppt);
   await writeAppointments(appointments);
 
-  return result({
-    success: true,
-    appointment_id: newAppt.id,
-    customer_id: customer.id,
-    service: { id: service.id, name: service.name },
-    therapist: { id: selectedTherapist.id, name: selectedTherapist.name },
-    start_time: newAppt.start_time,
-    end_time: newAppt.end_time,
-    status: newAppt.status,
-  });
+  return {
+    content: [{ type: 'text', text: JSON.stringify({
+      success: true,
+      appointment_id: newAppt.id,
+      customer_id: customer.id,
+      service: { id: service.id, name: service.name },
+      therapist: { id: selectedTherapist.id, name: selectedTherapist.name },
+      start_time: newAppt.start_time,
+      end_time: newAppt.end_time,
+      status: newAppt.status,
+      already_existed: false,
+    }, null, 2) }],
+    bookingOutcome: 'booking_created',
+  };
 }
 
 export async function handleGetAppointment(args: Record<string, unknown>): Promise<ToolEnvelope> {
@@ -521,4 +569,195 @@ export async function handleRescheduleBooking(args: Record<string, unknown>): Pr
     service: { id: service.id, name: service.name },
     therapist: { id: selected.id, name: selected.name },
   });
+}
+
+// ---------- Dynamic Webhook Variables (/dynamic-context) ----------
+//
+// Used by the Telnyx AI Assistant dynamic_variables_webhook_url. Telnyx
+// calls this at conversation initialization. We defensively extract the
+// caller's phone number, normalize it, and look up whether they are a
+// returning customer with upcoming appointments. The response is wrapped
+// under a top-level "dynamic_variables" object and never exposes PII other
+// than the customer's first name.
+
+/**
+ * Defensive extraction of the caller phone number from a Telnyx AI
+ * initialization webhook payload. The exact Telnyx payload shape can vary,
+ * so we check a set of reasonable nested fields and return the first
+ * string we find. Never throws; returns '' when no number is present.
+ *
+ * Fields checked, in order:
+ *   - payload.caller_phone_number
+ *   - payload.from_number
+ *   - payload.from
+ *   - payload.phone_number
+ *   - payload.customer.phone            (customer sub-object)
+ *   - payload.session.from_number
+ *   - payload.session.caller_phone_number
+ *   - payload.session.from
+ *   - payload.data.caller_phone_number
+ *   - payload.data.from_number
+ *   - top-level caller_phone_number / from_number / from / phone_number
+ *
+ * Also accepts the same fields under snake_case variants used elsewhere in
+ * our API (e.g. `phone` at the top level for parity with get_appointment).
+ */
+export function extractCallerPhone(payload: Record<string, unknown>): string {
+  const candidates: unknown[] = [];
+
+  // Top-level fields (parity with our /api inputs + common Telnyx shapes).
+  candidates.push(
+    payload.caller_phone_number,
+    payload.from_number,
+    payload.from,
+    payload.phone_number,
+    payload.phone,
+  );
+
+  // Nested `payload.session.*` (Telnyx AI Assistant session object).
+  const session = payload.session as Record<string, unknown> | undefined;
+  if (session && typeof session === 'object') {
+    candidates.push(
+      session.caller_phone_number,
+      session.from_number,
+      session.from,
+      session.phone_number,
+      session.phone,
+    );
+  }
+
+  // Nested `payload.data.*` (alternate Telnyx webhook envelope).
+  const data = payload.data as Record<string, unknown> | undefined;
+  if (data && typeof data === 'object') {
+    candidates.push(
+      data.caller_phone_number,
+      data.from_number,
+      data.from,
+      data.phone_number,
+      data.phone,
+    );
+  }
+
+  // Nested `payload.customer.phone` (Telnyx caller profile).
+  const customer = payload.customer as Record<string, unknown> | undefined;
+  if (customer && typeof customer === 'object') {
+    candidates.push(customer.phone, customer.phone_number);
+  }
+
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim() !== '') {
+      return c.trim();
+    }
+  }
+  return '';
+}
+
+/** Default dynamic_variables for an unknown / unresolvable caller. */
+function unknownDynamicVariables(): Record<string, unknown> {
+  return {
+    returning_customer: false,
+    customer_first_name: '',
+    has_appointments: false,
+    appointment_count: 0,
+    upcoming_service: '',
+    upcoming_appointment_time: '',
+    suggested_workflow: 'booking',
+  };
+}
+
+/**
+ * Build the /dynamic-context response. Returns the inner
+ * "dynamic_variables" object (the caller wraps it). Performs KV reads;
+ * async. Never throws — on any failure returns the unknown-caller defaults.
+ *
+ * PII policy: only customer_first_name is exposed. No customer_id,
+ * appointment_id, DOB, email, notes, or full phone number is returned.
+ */
+export async function handleDynamicContext(
+  payload: Record<string, unknown>,
+): Promise<{ dynamic_variables: Record<string, unknown> }> {
+  try {
+    const rawPhone = extractCallerPhone(payload);
+    const normalized = normalizePhone(rawPhone);
+
+    if (!normalized) {
+      return { dynamic_variables: unknownDynamicVariables() };
+    }
+
+    const customers = await readCustomers();
+    const matched = customers.filter(
+      (c) => normalizePhone(c.phone) === normalized,
+    );
+
+    if (matched.length === 0) {
+      return { dynamic_variables: unknownDynamicVariables() };
+    }
+
+    // Unique phone match is expected; if multiple share a phone, conservatively
+    // treat as unknown (do not expose which customer).
+    if (matched.length > 1) {
+      return { dynamic_variables: unknownDynamicVariables() };
+    }
+    const customer = matched[0];
+
+    const appointments = await readAppointments();
+    const confirmed = appointments.filter(
+      (a) => a.customer_id === customer.id && a.status === 'confirmed',
+    );
+
+    const appointmentCount = confirmed.length;
+    const hasAppointments = appointmentCount > 0;
+
+    // First name = first whitespace-separated token of the stored full name.
+    const firstName = (customer.name.trim().split(/\s+/)[0]) ?? '';
+
+    // Nearest future confirmed appointment (by start_time ascending). We
+    // compare instants; "future" is relative to now in spa time.
+    const now = Date.now();
+    let upcoming: Appointment | undefined;
+    let upcomingInstant = Infinity;
+    for (const a of confirmed) {
+      const inst = parseSpaInput(a.start_time, 'appointment start_time').getTime();
+      if (inst >= now && inst < upcomingInstant) {
+        upcomingInstant = inst;
+        upcoming = a;
+      }
+    }
+
+    // If none in the future, fall back to the soonest of all confirmed
+    // (so a caller with a past appointment still sees context). This keeps
+    // has_appointments consistent with appointment_count.
+    if (!upcoming && confirmed.length > 0) {
+      let soonestInstant = -Infinity;
+      for (const a of confirmed) {
+        const inst = parseSpaInput(a.start_time, 'appointment start_time').getTime();
+        if (inst > soonestInstant) {
+          soonestInstant = inst;
+          upcoming = a;
+        }
+      }
+    }
+
+    // Resolve the upcoming service display name from bundled static data.
+    let upcomingService = '';
+    if (upcoming) {
+      const svc = SERVICES.find((s) => s.id === upcoming!.service_id);
+      upcomingService = svc?.name ?? upcoming.service_id;
+    }
+
+    return {
+      dynamic_variables: {
+        returning_customer: true,
+        customer_first_name: firstName,
+        has_appointments: hasAppointments,
+        appointment_count: appointmentCount,
+        upcoming_service: upcoming ? upcomingService : '',
+        upcoming_appointment_time: upcoming ? upcoming.start_time : '',
+        suggested_workflow: hasAppointments ? 'client_services' : 'booking',
+      },
+    };
+  } catch {
+    // Never fail the webhook — return safe defaults.
+    return { dynamic_variables: unknownDynamicVariables() };
+  }
 }
