@@ -87,10 +87,10 @@ const tools = [
     name: 'create_booking',
     description:
       'Book an appointment. Customer resolution: supply `customer_id` ' +
-      '(UUID) OR `customer` (name + phone or email). If the customer ' +
-      'exists, reuses their UUID (no duplicate). If not, creates a new ' +
-      'customer. If multiple customers share the name, phone or email ' +
-      'disambiguates. `therapist_id` is optional (auto-selects).',
+      '(UUID) OR `customer` (first_name + last_name + phone). For new ' +
+      'customers all three are required. If an existing customer matches ' +
+      'the full name + phone, reuses their UUID (no duplicate). ' +
+      '`therapist_id` is optional (auto-selects).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -101,18 +101,20 @@ const tools = [
         customer: {
           type: 'object',
           description:
-            'Customer details. Reuses an existing customer if name+phone ' +
-            'or name+email matches; otherwise creates a new customer. ' +
-            'Mutually exclusive with `customer_id`.',
+            'Customer details. Reuses an existing customer if full name + ' +
+            'phone matches; otherwise creates a new customer. ' +
+            'first_name, last_name, and phone are required for new ' +
+            'customers. Mutually exclusive with `customer_id`.',
           properties: {
-            name: { type: 'string', description: 'Required.' },
-            phone: { type: 'string', description: 'Required for new customers; disambiguates duplicate names.' },
-            email: { type: 'string', description: 'Optional; disambiguates duplicate names.' },
+            first_name: { type: 'string', description: 'Required.' },
+            last_name: { type: 'string', description: 'Required.' },
+            phone: { type: 'string', description: 'Required. Formatting-insensitive matching (e.g. +1-213-555-1234 == 2135551234).' },
+            email: { type: 'string', description: 'Optional.' },
             postcode: { type: 'string', description: 'Optional.' },
             date_of_birth: { type: 'string', description: 'Optional.' },
             notes: { type: 'string', description: 'Optional.' },
           },
-          required: ['name'],
+          required: ['first_name', 'last_name', 'phone'],
         },
         service: { type: 'string', description: 'Service ID or name.' },
         therapist_id: {
@@ -130,69 +132,69 @@ const tools = [
   {
     name: 'get_appointment',
     description:
-      'Look up appointments by appointment ID, customer ID, or customer ' +
-      'name. Returns the appointment(s) with human-readable service, ' +
-      'therapist, and customer-name information. If the customer name ' +
-      'matches multiple customers, returns the candidate customers and ' +
-      'indicates additional verification is required (does NOT guess). ' +
-      'Customer-sensitive fields (phone/email/DOB/notes) are not exposed.',
+      'Look up appointments by customer phone number. Phone is the ' +
+      'primary caller-facing lookup; callers do not need to know the ' +
+      'internal customer_id or appointment_id. Normalizes phone so ' +
+      'formatting differences match. Returns found:false if no customer ' +
+      'matches. If multiple customers share the same phone, returns an ' +
+      'ambiguity error. appointment_id and customer_id remain as optional ' +
+      'internal lookup methods. Customer-sensitive fields ' +
+      '(phone/email/DOB/notes) are not exposed in results.',
     inputSchema: {
       type: 'object',
       properties: {
+        phone: {
+          type: 'string',
+          description:
+            'Customer phone number (primary lookup). Formatting-insensitive: ' +
+            '"+1-213-555-1234", "(213) 555-1234", and "2135551234" all match ' +
+            'the same customer. Matches full normalized numbers only.',
+        },
         appointment_id: {
           type: 'string',
-          description: 'An appointment ID, e.g. "apt-1001".',
+          description: 'Optional. An appointment ID for direct lookup.',
         },
         customer_id: {
           type: 'string',
-          description:
-            'A customer ID (UUID). Returns all matching appointments for that customer.',
-        },
-        customer_name: {
-          type: 'string',
-          description:
-            'A customer name (exact match). If unique, returns that ' +
-            'customer\'s appointments. If multiple customers share the ' +
-            'name, returns the candidates for disambiguation.',
+          description: 'Optional. A customer UUID for direct lookup.',
         },
       },
-      required: [],
+      required: ['phone'],
     },
   },
   {
     name: 'reschedule_booking',
     description:
-      'Move an existing confirmed appointment to a new start time. ' +
-      'Preserves the original service, customer, appointment ID, and ' +
-      '"confirmed" status. Re-validates working schedule and conflicts ' +
-      'before mutating. Therapist selection: `new_therapist_id` is ' +
-      'OPTIONAL. If provided, reschedule only with that therapist after ' +
-      'validating service compatibility and availability. If omitted, ' +
-      'prefer the existing therapist when they are available at the new ' +
-      'time; otherwise automatically select another therapist qualified ' +
-      'for the existing service who is available at the new time. If no ' +
-      'qualified therapist is available, returns rescheduled:false. ' +
-      'Returns the selected therapist in the result.',
+      'Reschedule an existing confirmed appointment to a new start time. ' +
+      'The caller identifies themselves with first_name + last_name + ' +
+      'phone (all required); the server resolves the customer, finds ' +
+      'their upcoming confirmed appointment, and reschedules it. If the ' +
+      'customer has multiple upcoming appointments, returns them for the ' +
+      'caller to disambiguate (does NOT modify any). Preserves the ' +
+      'original service, customer, appointment ID, and "confirmed" ' +
+      'status. `new_therapist_id` is OPTIONAL; if omitted, prefers the ' +
+      'existing therapist when available, otherwise auto-selects another ' +
+      'qualified available therapist.',
     inputSchema: {
       type: 'object',
       properties: {
-        appointment_id: { type: 'string', description: 'Existing appointment ID.' },
+        first_name: { type: 'string', description: 'Customer first name. Required.' },
+        last_name: { type: 'string', description: 'Customer last name. Required.' },
+        phone: {
+          type: 'string',
+          description: 'Customer phone. Required. Formatting-insensitive ' +
+            'matching (e.g. +1-213-555-1234 == 2135551234).',
+        },
         new_start_time: {
           type: 'string',
-          description:
-            'New start time as an ISO string with timezone, e.g. ' +
-            '"2026-10-09T13:00:00-07:00".',
+          description: 'New start time. Accepts ISO or natural forms.',
         },
         new_therapist_id: {
           type: 'string',
-          description:
-            'OPTIONAL. If provided, reschedule only with this therapist ' +
-            '(must offer the appointment\'s service and be available). If ' +
-            'omitted, the server prefers the existing therapist and ' +
-            'otherwise auto-selects another qualified available therapist.',
+          description: 'Optional therapist ID. If omitted, auto-selects an available qualified therapist.',
         },
       },
-      required: ['appointment_id', 'new_start_time'],
+      required: ['first_name', 'last_name', 'phone', 'new_start_time'],
     },
   },
 ] as const;
@@ -340,12 +342,15 @@ function handleCreateBooking(args: Record<string, unknown>) {
   }
 
   // Validate new-customer required fields early, with clear structured
-  // errors, before any persistence. `name` is always required when a
-  // customer object is provided; `phone` is required only if no existing
-  // customer matches (enforced later at resolution time).
+  // errors, before any persistence. For a customer object, the caller
+  // must provide first_name + last_name + phone (all three required for
+  // new/guest bookings). The full name is built as
+  // "<first_name> <last_name>".
   if (customerObjProvided) {
-    const name = fieldStr(customerObj, 'name');
-    if (!name) return toolError('`customer.name` is required.');
+    const fn = fieldStr(customerObj, 'first_name');
+    const ln = fieldStr(customerObj, 'last_name');
+    if (!fn) return toolError('`customer.first_name` is required.');
+    if (!ln) return toolError('`customer.last_name` is required.');
   }
 
   // Validate service.
@@ -409,12 +414,12 @@ function handleCreateBooking(args: Record<string, unknown>) {
   // The UUID is the authoritative internal ID; the caller does NOT need
   // to know it. Resolution order:
   //   1. customer_id provided -> direct lookup (must exist)
-  //   2. customer object provided -> search by name + (phone OR email):
+  //   2. customer object provided -> build full name from first_name +
+  //      last_name, normalize phone, then search by normalized phone:
   //      - exactly one match -> reuse existing UUID (no duplicate)
-  //      - multiple matches on name, with phone/email to disambiguate ->
-  //        narrow to the one matching phone or email
-  //      - multiple matches on name, no disambiguator -> error (never guess)
-  //      - no match -> create new customer (requires phone)
+  //      - no match -> create new customer (first_name, last_name, phone
+  //        were validated above; phone normalization is applied)
+  //      - multiple matches on the same normalized phone -> error (never guess)
   let customer: Customer;
   if (customerId) {
     const customers = loadCustomers();
@@ -423,77 +428,35 @@ function handleCreateBooking(args: Record<string, unknown>) {
     customer = found;
   } else {
     const customers = loadCustomers();
-    const name = fieldStr(customerObj!, 'name');
+    const firstName = fieldStr(customerObj!, 'first_name');
+    const lastName = fieldStr(customerObj!, 'last_name');
+    const fullName = `${firstName} ${lastName}`.trim();
     const phone = fieldStr(customerObj!, 'phone');
-    const email = fieldStr(customerObj!, 'email');
+    const normalizedPhone = normalizePhone(phone);
 
-    // Collect customers sharing this name.
-    const byName = customers.filter((c) => c.name === name);
+    // Match existing customers by normalized phone (full number only).
+    const matched = customers.filter(
+      (c) => normalizePhone(c.phone) === normalizedPhone && normalizedPhone !== '',
+    );
 
-    if (byName.length === 0) {
-      // No existing customer with this name -> create new (needs phone).
+    if (matched.length === 1) {
+      customer = matched[0]; // reuse existing UUID (no duplicate)
+    } else if (matched.length > 1) {
+      return toolError(
+        `Multiple customers share phone "${phone}". Provide the specific ` +
+        '`customer_id` to target one.',
+      );
+    } else {
+      // No existing match -> create new customer. Phone is required for a
+      // new booking; first_name and last_name were validated above.
       if (!phone) {
         return toolError(
-          `No existing customer named "${name}". ` +
-          '`customer.phone` is required to create a new customer.',
+          '`customer.phone` is required for a new customer booking.',
         );
       }
       customer = buildNewCustomer(customerObj!, customers);
       customers.push(customer);
       saveCustomers(customers);
-    } else if (byName.length === 1) {
-      // Unique name match. If phone/email provided, verify they match the
-      // existing record; if they don't, treat as a new customer (requires
-      // phone) rather than silently reusing the wrong record.
-      const existing = byName[0];
-      const phoneOk = !phone || existing.phone === phone;
-      const emailOk = !email || existing.email === email;
-      if (phoneOk && emailOk) {
-        customer = existing; // reuse existing UUID
-      } else {
-        // Caller provided phone/email that doesn't match the existing
-        // record -> a genuinely different person. Create new (needs phone).
-        if (!phone) {
-          return toolError(
-            `Customer "${name}" exists with different contact details. ` +
-            '`customer.phone` is required to create a new customer.',
-          );
-        }
-        customer = buildNewCustomer(customerObj!, customers);
-        customers.push(customer);
-        saveCustomers(customers);
-      }
-    } else {
-      // Multiple customers share this name. Use phone or email to
-      // disambiguate; never guess.
-      if (!phone && !email) {
-        return toolError(
-          `Multiple customers named "${name}". Provide ` +
-          '`customer.phone` or `customer.email` (or `customer_id`) to disambiguate.',
-        );
-      }
-      const narrowed = byName.filter(
-        (c) => (phone && c.phone === phone) || (email && c.email === email),
-      );
-      if (narrowed.length === 1) {
-        customer = narrowed[0];
-      } else if (narrowed.length === 0) {
-        // No name+phone/email match -> new customer (needs phone).
-        if (!phone) {
-          return toolError(
-            `No existing customer named "${name}" with that phone/email. ` +
-            '`customer.phone` is required to create a new customer.',
-          );
-        }
-        customer = buildNewCustomer(customerObj!, customers);
-        customers.push(customer);
-        saveCustomers(customers);
-      } else {
-        return toolError(
-          `Multiple customers named "${name}" match the provided phone/email. ` +
-          'Provide the specific `customer_id` to target one.',
-        );
-      }
     }
   }
 
@@ -526,13 +489,16 @@ function handleCreateBooking(args: Record<string, unknown>) {
 // ---------- Client Services handlers ----------
 
 function handleGetAppointment(args: Record<string, unknown>) {
+  const phone = str(args, 'phone');
   const appointmentId = str(args, 'appointment_id');
   const customerId = str(args, 'customer_id');
-  const customerName = str(args, 'customer_name');
 
-  if (!appointmentId && !customerId && !customerName) {
+  // `phone` is the primary caller-facing lookup. appointment_id and
+  // customer_id remain as optional internal lookup methods. At least one
+  // must be provided.
+  if (!phone && !appointmentId && !customerId) {
     return toolError(
-      'Provide `appointment_id`, `customer_id`, or `customer_name`.',
+      'Provide `phone` (preferred), or `appointment_id`/`customer_id` for internal lookup.',
     );
   }
 
@@ -541,11 +507,10 @@ function handleGetAppointment(args: Record<string, unknown>) {
   const therapists = loadTherapists();
   const customers = loadCustomers();
 
-  // Build lookups once for resolving service/therapist names.
   const serviceById = new Map(services.map((s) => [s.id, s] as const));
   const therapistById = new Map(therapists.map((t) => [t.id, t] as const));
 
-  // --- By appointment_id or customer_id: direct lookup --------------
+  // --- By appointment_id or customer_id: direct internal lookup ----
   if (appointmentId || customerId) {
     const matches = appointments.filter((a) => {
       if (appointmentId) return a.id === appointmentId;
@@ -567,76 +532,141 @@ function handleGetAppointment(args: Record<string, unknown>) {
     return toolResult({ found: true, count: projected.length, appointments: projected });
   }
 
-  // --- By customer_name: needs disambiguation -----------------------
-  // Find all customers matching the given name (case-sensitive exact
-  // match; the AI assistant can normalize casing before calling).
-  const nameMatches = customers.filter((c) => c.name === customerName);
+  // --- By phone (primary caller-facing lookup) ----------------------
+  // Normalize before matching so formatting differences resolve to the
+  // same customer. Match the FULL normalized number only (never partial).
+  const normalized = normalizePhone(phone);
+  const matched = customers.filter(
+    (c) => normalizePhone(c.phone) === normalized && normalized !== '',
+  );
 
-  if (nameMatches.length === 0) {
+  if (matched.length === 0) {
     return toolResult({
       found: false,
-      message: `No customer named "${customerName}".`,
+      message: `No customer with phone "${phone}".`,
     });
   }
 
-  if (nameMatches.length === 1) {
-    // Unique customer → return their appointments.
-    const cus = nameMatches[0];
-    const matches = appointments.filter((a) => a.customer_id === cus.id);
-    if (matches.length === 0) {
+  if (matched.length === 1) {
+    const cus = matched[0];
+    const appts = appointments.filter((a) => a.customer_id === cus.id);
+    if (appts.length === 0) {
       return toolResult({
         found: false,
-        message: `No appointments found for "${customerName}".`,
+        message: `No appointments found for phone "${phone}".`,
       });
     }
-    const projected = matches.map((a) =>
+    const projected = appts.map((a) =>
       projectAppointment(a, serviceById, therapistById),
     );
     return toolResult({ found: true, count: projected.length, appointments: projected });
   }
 
-  // Multiple customers with the same name → return the candidate
-  // customers (ID + name only, no sensitive fields) and indicate that
-  // additional verification is required. Do NOT arbitrarily pick one.
+  // Multiple customers share the same normalized phone -> error (never
+  // guess). Return candidate customer IDs (no sensitive fields) for the
+  // caller to disambiguate via customer_id.
   return toolResult({
     found: true,
     ambiguous: true,
     message:
-      `Multiple customers named "${customerName}" were found. ` +
-      'Provide `customer_id` or verify identity with the customer\'s phone ' +
-      'number to select the right one.',
-    matching_customers: nameMatches.map((c) => ({
+      `Multiple customers share phone "${phone}". Provide the specific ` +
+    '`customer_id` to target one.',
+    matching_customers: matched.map((c) => ({
       customer_id: c.id,
       name: c.name,
     })),
-    count: nameMatches.length,
+    count: matched.length,
   });
 }
 
 function handleRescheduleBooking(args: Record<string, unknown>) {
-  const appointmentId = str(args, 'appointment_id');
+  const firstName = str(args, 'first_name');
+  const lastName = str(args, 'last_name');
+  const phone = str(args, 'phone');
   const newStartStr = str(args, 'new_start_time');
   const newTherapistId = str(args, 'new_therapist_id'); // optional
 
-  if (!appointmentId || !newStartStr) {
-    return toolError('`appointment_id` and `new_start_time` are required.');
-  }
-
-  const appointments = loadAppointments();
-  const idx = appointments.findIndex((a) => a.id === appointmentId);
-  if (idx === -1) {
-    return toolResult({
-      rescheduled: false,
-      message: `No appointment with id "${appointmentId}".`,
-    });
-  }
-  const existing = appointments[idx];
-
-  if (existing.status !== 'confirmed') {
+  // All three customer-identification fields are required. Name alone is
+  // never sufficient.
+  if (!firstName || !lastName || !phone || !newStartStr) {
     return toolError(
-      `Appointment "${appointmentId}" has status "${existing.status}"; only confirmed appointments can be rescheduled.`,
+      '`first_name`, `last_name`, `phone`, and `new_start_time` are required.',
     );
   }
+
+  // Resolve the customer by full name + normalized phone. Never identify
+  // by name alone.
+  const fullName = `${firstName} ${lastName}`.trim();
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) {
+    return toolResult({
+      rescheduled: false,
+      message: `No customer found for phone "${phone}".`,
+    });
+  }
+
+  const customers = loadCustomers();
+  const matchedCustomers = customers.filter(
+    (c) => c.name === fullName && normalizePhone(c.phone) === normalizedPhone,
+  );
+
+  if (matchedCustomers.length === 0) {
+    return toolResult({
+      rescheduled: false,
+      message: `No customer found for "${fullName}" with phone "${phone}".`,
+    });
+  }
+  if (matchedCustomers.length > 1) {
+    return toolResult({
+      rescheduled: false,
+      ambiguous: true,
+      message:
+        `Multiple customer records match "${fullName}" + phone "${phone}". ` +
+        'This should not happen with unique phone numbers; please contact support.',
+      matching_customers: matchedCustomers.map((c) => ({
+        customer_id: c.id,
+        name: c.name,
+      })),
+      count: matchedCustomers.length,
+    });
+  }
+  const customer = matchedCustomers[0];
+
+  // Find this customer's upcoming confirmed appointments.
+  const appointments = loadAppointments();
+  const serviceById = new Map(loadServices().map((s) => [s.id, s] as const));
+  const therapistById = new Map(loadTherapists().map((t) => [t.id, t] as const));
+
+  const upcoming = appointments.filter(
+    (a) => a.customer_id === customer.id && a.status === 'confirmed',
+  );
+
+  if (upcoming.length === 0) {
+    return toolResult({
+      rescheduled: false,
+      message: `No upcoming confirmed appointments found for "${fullName}".`,
+    });
+  }
+
+  if (upcoming.length > 1) {
+    // Do NOT arbitrarily reschedule one. Return the matching appointments
+    // with non-sensitive details so the caller can identify the intended
+    // appointment. Do not modify any appointment.
+    return toolResult({
+      rescheduled: false,
+      ambiguous: true,
+      message:
+        `Multiple upcoming appointments found for "${fullName}". Please ` +
+        'specify which appointment to reschedule.',
+      matching_appointments: upcoming.map((a) =>
+        projectAppointment(a, serviceById, therapistById),
+      ),
+      count: upcoming.length,
+    });
+  }
+
+  const existing = upcoming[0];
+  const idx = appointments.findIndex((a) => a.id === existing.id);
 
   const services = loadServices();
   const service = services.find((s) => s.id === existing.service_id);
@@ -753,20 +783,25 @@ function findService(services: Service[], query: string): Service | undefined {
 function mintCustomer(obj: Record<string, unknown>): Customer {
   // Kept for backward compatibility with any internal callers; new
   // booking flow uses buildNewCustomer (which assigns a unique ID).
-  const name = fieldStr(obj, 'name');
+  const firstName = fieldStr(obj, 'first_name') || fieldStr(obj, 'name');
+  const lastName = fieldStr(obj, 'last_name');
   const phone = fieldStr(obj, 'phone');
-  if (!name || !phone) {
-    throw new Error('New customer requires at least `name` and `phone`.');
+  if (!firstName || !lastName || !phone) {
+    throw new Error('New customer requires `first_name`, `last_name`, and `phone`.');
   }
   return buildNewCustomer(obj, []);
 }
 
 /** Build a new Customer from input, assigning a unique UUID-based ID. */
 function buildNewCustomer(obj: Record<string, unknown>, existing: Customer[]): Customer {
-  const name = fieldStr(obj, 'name');
+  const firstName = fieldStr(obj, 'first_name');
+  const lastName = fieldStr(obj, 'last_name');
   const phone = fieldStr(obj, 'phone');
-  if (!name) throw new Error('New customer requires `name`.');
+  if (!firstName) throw new Error('New customer requires `first_name`.');
+  if (!lastName) throw new Error('New customer requires `last_name`.');
   if (!phone) throw new Error('New customer requires `phone`.');
+  // Full name stored consistently from first_name + last_name.
+  const name = `${firstName} ${lastName}`.trim();
   return {
     id: generateUniqueCustomerId(existing),
     name,
@@ -817,6 +852,31 @@ function isPopulatedCustomerObj(obj: unknown): obj is Record<string, unknown> {
 function str(rec: Record<string, unknown>, key: string): string {
   const v = rec[key];
   return typeof v === 'string' ? v.trim() : '';
+}
+
+/**
+ * Normalize a phone number for matching so equivalent US formats compare
+ * equal, e.g. "+1-415-555-0126", "1-415-555-0126", "(415) 555-0126",
+ * "415-555-0126", and "4155550126" all normalize to "4155550126".
+ *
+ * Rules:
+ *   - Strip all non-digits.
+ *   - For US numbers, strip a single leading "1" country code so 10-digit
+ *     forms and 11-digit "1+area" forms collapse to the same 10 digits.
+ *   - Non-US / non-10-or-11-digit inputs keep their full digit string.
+ *
+ * Matching is on the FULL normalized number only (never partial). Returns
+ * the empty string when the input contains no digits.
+ */
+function normalizePhone(phone: string): string {
+  let digits = phone.replace(/\D+/g, '');
+  if (!digits) return '';
+  // Strip a leading US country code "1" when the remaining number is
+  // exactly 10 digits (US NANP form).
+  if (digits.length === 11 && digits.startsWith('1')) {
+    digits = digits.slice(1);
+  }
+  return digits;
 }
 
 function toolResult(data: unknown) {

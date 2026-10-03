@@ -251,16 +251,18 @@ async function main() {
     const setupId = bookData.appointment_id;
     const setupStart = bookData.start_time; // 09:00 Wed
 
-    // 1. Successful reschedule: apt-1001 (Maya, deep-tissue, Mon 10:00) -> Mon 13:00.
+    // 1. Successful reschedule: David's apt-1001 (Maya, deep-tissue, Mon 10:00) -> Mon 13:00.
     const okRes = await client.callTool({
       name: 'reschedule_booking',
       arguments: {
-        appointment_id: 'apt-1001',
+        first_name: 'David',
+        last_name: 'Okonkwo',
+        phone: '+1-415-555-0178',
         new_start_time: '2026-10-05T13:00:00-07:00',
       },
     });
     const okData = JSON.parse((okRes.content as Array<{ type: string; text: string }>)[0].text);
-    ok(okData.rescheduled === true, 'reschedule apt-1001 to Mon 13:00 succeeds');
+    ok(okData.rescheduled === true, 'reschedule David to Mon 13:00 succeeds');
     ok(okData.appointment.id === 'apt-1001', 'same appointment ID preserved');
     ok(okData.appointment.customer_id === CUS_DAVID, 'customer preserved');
     ok(okData.appointment.service_id === 'svc-deep-tissue-massage', 'service preserved');
@@ -272,37 +274,43 @@ async function main() {
       'start/end recalculated in spa time; 13:00 + 75 min = 14:15 (same wall clock, -07:00 offset)',
     );
 
-    // 2. Conflict: reschedule apt-1001 (Maya) to overlap the setup booking.
+    // 2. Conflict: reschedule David to overlap the setup booking.
     //    setupStart ≈ 2026-10-07T09:00 PDT. 09:30 deep-tissue = 09:30-10:45 overlaps 09:00-10:00.
     const conflictStart = new Date(new Date(setupStart).getTime() + 30 * 60_000)
       .toISOString();
     const conflictRes = await client.callTool({
       name: 'reschedule_booking',
       arguments: {
-        appointment_id: 'apt-1001',
+        first_name: 'David',
+        last_name: 'Okonkwo',
+        phone: '+1-415-555-0178',
         new_start_time: conflictStart,
       },
     });
     const conflictData = JSON.parse((conflictRes.content as Array<{ type: string; text: string }>)[0].text);
     ok(conflictData.rescheduled === false, 'reschedule to conflicting slot rejected');
 
-    // 3. Outside working hours: apt-1001 (Maya works Mon 09-17) -> Mon 18:30.
+    // 3. Outside working hours: David (Maya works Mon 09-17) -> Mon 18:30.
     const oohRes = await client.callTool({
       name: 'reschedule_booking',
       arguments: {
-        appointment_id: 'apt-1001',
+        first_name: 'David',
+        last_name: 'Okonkwo',
+        phone: '+1-415-555-0178',
         new_start_time: '2026-10-05T18:30:00-07:00',
       },
     });
     const oohData = JSON.parse((oohRes.content as Array<{ type: string; text: string }>)[0].text);
     ok(oohData.rescheduled === false, 'reschedule outside working hours rejected');
 
-    // 4. New therapist who doesn't offer the service: apt-1001 is deep-tissue,
+    // 4. New therapist who doesn't offer the service: David's is deep-tissue,
     //    Priya does not offer deep-tissue.
     const mismatchRes = await client.callTool({
       name: 'reschedule_booking',
       arguments: {
-        appointment_id: 'apt-1001',
+        first_name: 'David',
+        last_name: 'Okonkwo',
+        phone: '+1-415-555-0178',
         new_start_time: '2026-10-06T11:00:00-07:00',
         new_therapist_id: 'thr-priya',
       },
@@ -313,11 +321,13 @@ async function main() {
       'new therapist lacking service -> error',
     );
 
-    // 5. New therapist who DOES offer the service: apt-1001 (deep-tissue) -> James on Tue.
+    // 5. New therapist who DOES offer the service: David (deep-tissue) -> James on Tue.
     const swapRes = await client.callTool({
       name: 'reschedule_booking',
       arguments: {
-        appointment_id: 'apt-1001',
+        first_name: 'David',
+        last_name: 'Okonkwo',
+        phone: '+1-415-555-0178',
         new_start_time: '2026-10-06T11:00:00-07:00',
         new_therapist_id: 'thr-james',
       },
@@ -328,23 +338,27 @@ async function main() {
     ok(swapData.appointment.id === 'apt-1001', 'ID still preserved after therapist swap');
     ok(swapData.appointment.service_id === 'svc-deep-tissue-massage', 'service preserved after swap');
 
-    // 6. Unknown appointment id -> not-found result.
+    // 6. Unknown customer (wrong phone) -> rescheduled:false.
     const nfRes = await client.callTool({
       name: 'reschedule_booking',
       arguments: {
-        appointment_id: 'apt-9999',
+        first_name: 'No',
+        last_name: 'Suchperson',
+        phone: '+1-999-999-9999',
         new_start_time: '2026-10-08T10:00:00-07:00',
       },
     });
     const nfData = JSON.parse((nfRes.content as Array<{ type: string; text: string }>)[0].text);
-    ok(nfData.rescheduled === false, 'unknown appointment id -> rescheduled:false');
+    ok(nfData.rescheduled === false, 'unknown customer -> rescheduled:false');
 
-    // 7. Self-exclusion sanity check: reschedule the setup booking to its own
+    // 7. Self-exclusion sanity check: reschedule Elena's setup booking to its own
     //    current start time should succeed (it excludes itself).
     const selfRes = await client.callTool({
       name: 'reschedule_booking',
       arguments: {
-        appointment_id: setupId,
+        first_name: 'Elena',
+        last_name: 'Marsh',
+        phone: '+1-415-555-0142',
         new_start_time: setupStart,
       },
     });
@@ -399,7 +413,8 @@ async function main() {
         name: 'create_booking',
         arguments: {
           customer: {
-            name: 'Alex Chen',
+            first_name: 'Alex',
+            last_name: 'Chen',
             phone: '+1-310-555-0123',
             email: 'alex.chen@example.com',
           },
@@ -449,20 +464,20 @@ async function main() {
          'F. unknown customer_id -> structured error');
     }
 
-    // G. New customer without name is rejected.
+    // G. New customer without first_name is rejected.
     {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { phone: '+1-310-555-0999' },
+          customer: { last_name: 'NoFirst', phone: '+1-310-555-0999' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-07T15:00:00-07:00',
         },
       });
       const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
-      ok((r as any).isError === true && /name.*required/i.test(JSON.stringify(data)),
-         'G. new customer without name rejected');
+      ok((r as any).isError === true && /first_name.*required/i.test(JSON.stringify(data)),
+         'G. new customer without first_name rejected');
     }
 
     // H. New customer without phone is rejected (no existing match -> needs phone).
@@ -470,7 +485,7 @@ async function main() {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Pat NoPhone' },
+          customer: { first_name: 'Pat', last_name: 'NoPhone' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-07T15:00:00-07:00',
@@ -502,7 +517,7 @@ async function main() {
         name: 'create_booking',
         arguments: {
           customer_id: CUS_ELENA,
-          customer: { name: 'Alex Chen', phone: '+1-310-555-0123' },
+          customer: { first_name: 'Alex', last_name: 'Chen', phone: '+1-310-555-0123' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-07T15:00:00-07:00',
@@ -521,7 +536,7 @@ async function main() {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Sam Smith', phone: '+1-415-555-0888' },
+          customer: { first_name: 'Sam', last_name: 'Smith', phone: '+1-415-555-0888' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-07T09:00:00-07:00',
@@ -538,7 +553,7 @@ async function main() {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Orphan Check', phone: '+1-415-555-0777' },
+          customer: { first_name: 'Orphan', last_name: 'Check', phone: '+1-415-555-0777' },
           service: 'svc-facial', // Maya does not offer facial
           therapist_id: 'thr-maya',
           start_time: '2026-10-08T10:00:00-07:00',
@@ -554,7 +569,7 @@ async function main() {
       const r2 = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Orphan Two', phone: '+1-415-555-0666' },
+          customer: { first_name: 'Orphan', last_name: 'Two', phone: '+1-415-555-0666' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-07T09:00:00-07:00',
@@ -616,7 +631,7 @@ async function main() {
       const misRes = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Mismatch Mary', phone: '+1-415-555-0555' },
+          customer: { first_name: 'Mismatch', last_name: 'Mary', phone: '+1-415-555-0555' },
           service: 'svc-facial',
           therapist_id: 'thr-maya', // Maya != facial
           start_time: '2026-10-08T11:00:00-07:00',
@@ -641,7 +656,9 @@ async function main() {
       const r = await client.callTool({
         name: 'reschedule_booking',
         arguments: {
-          appointment_id: 'apt-1001',
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
           new_start_time: '2026-10-06T12:00:00-07:00', // Tue 12:00, Maya free
         },
       });
@@ -674,7 +691,9 @@ async function main() {
       const r = await client.callTool({
         name: 'reschedule_booking',
         arguments: {
-          appointment_id: 'apt-1001',
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
           new_start_time: '2026-10-06T13:00:00-07:00', // deep-tissue 13:00-14:15
           // no new_therapist_id -> auto-select
         },
@@ -699,7 +718,9 @@ async function main() {
       const r = await client.callTool({
         name: 'reschedule_booking',
         arguments: {
-          appointment_id: 'apt-1001',
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
           new_start_time: '2026-10-06T15:00:00-07:00',
           new_therapist_id: 'thr-james',
         },
@@ -719,7 +740,9 @@ async function main() {
       const r = await client.callTool({
         name: 'reschedule_booking',
         arguments: {
-          appointment_id: 'apt-1001',
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
           new_start_time: '2026-10-06T15:00:00-07:00',
           new_therapist_id: 'thr-priya', // Priya does not offer deep-tissue
         },
@@ -749,7 +772,9 @@ async function main() {
       const r = await client.callTool({
         name: 'reschedule_booking',
         arguments: {
-          appointment_id: 'apt-1001',
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
           new_start_time: '2026-10-06T14:00:00-07:00', // deep-tissue 14:00-15:15 overlaps James 14:00-14:50
           new_therapist_id: 'thr-james',
         },
@@ -769,7 +794,9 @@ async function main() {
       const r = await client.callTool({
         name: 'reschedule_booking',
         arguments: {
-          appointment_id: 'apt-1001',
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
           new_start_time: '2026-10-04T11:00:00-07:00', // Sunday
           // no new_therapist_id
         },
@@ -789,7 +816,9 @@ async function main() {
       const r = await client.callTool({
         name: 'reschedule_booking',
         arguments: {
-          appointment_id: 'apt-1001',
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
           new_start_time: '2026-10-04T11:00:00-07:00', // Sunday
           new_therapist_id: 'thr-maya', // Maya doesn't work Sundays
         },
@@ -797,6 +826,146 @@ async function main() {
       const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
       ok(data.rescheduled === false, '4b. explicit therapist outside working hours -> rescheduled:false');
     }
+  }
+
+  console.log('\n[7b] reschedule_booking: multiple upcoming / no-match');
+  {
+    // 1. Multiple upcoming appointments -> ambiguous, no modification.
+    {
+      saveAppointments(apptSnapshot);
+      saveCustomers(custSnapshot);
+      // David has apt-1001 (Mon 10:00). Add a second confirmed appt.
+      const second = await client.callTool({
+        name: 'create_booking',
+        arguments: {
+          customer_id: CUS_DAVID,
+          service: 'svc-swedish-massage',
+          therapist_id: 'thr-maya',
+          start_time: '2026-10-07T09:00:00-07:00', // Wed 09:00 (no conflict)
+        },
+      });
+      const secondData = JSON.parse((second.content as Array<{ type: string; text: string }>)[0].text);
+      ok(secondData.success === true, 'setup: David has a 2nd confirmed appt');
+
+      const r = await client.callTool({
+        name: 'reschedule_booking',
+        arguments: {
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
+          new_start_time: '2026-10-08T10:00:00-07:00',
+        },
+      });
+      const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
+      ok(data.rescheduled === false,
+         '1a. multiple upcoming -> rescheduled:false (no modification)');
+      ok(data.ambiguous === true,
+         '1b. ambiguous flag set');
+      ok(Array.isArray(data.matching_appointments) && data.matching_appointments.length === 2,
+         '1c. returns both upcoming appointments');
+      const apptsAfter = loadAppointments().filter((a) => a.customer_id === CUS_DAVID);
+      ok(apptsAfter.length === 2 &&
+         !apptsAfter.some((a) => a.start_time.startsWith('2026-10-08T10:00')),
+         '1d. no appointment moved to the requested time');
+      ok(/Multiple upcoming appointments/.test(data.message),
+         '1e. message indicates multiple upcoming');
+    }
+
+    // 2. No matching customer -> rescheduled:false.
+    {
+      saveAppointments(apptSnapshot);
+      saveCustomers(custSnapshot);
+      const r = await client.callTool({
+        name: 'reschedule_booking',
+        arguments: {
+          first_name: 'Ghost',
+          last_name: 'Customer',
+          phone: '+1-999-999-0000',
+          new_start_time: '2026-10-08T10:00:00-07:00',
+        },
+      });
+      const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
+      ok(data.rescheduled === false && /No customer found/.test(data.message),
+         '2. no matching customer -> rescheduled:false with clear message');
+    }
+
+    // 3. Customer exists but no upcoming confirmed appointments -> rescheduled:false.
+    {
+      saveAppointments(apptSnapshot);
+      saveCustomers(custSnapshot);
+      const appts = loadAppointments().map((a) =>
+        a.id === 'apt-1001' ? { ...a, status: 'cancelled' as const } : a,
+      );
+      saveAppointments(appts);
+
+      const r = await client.callTool({
+        name: 'reschedule_booking',
+        arguments: {
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
+          new_start_time: '2026-10-08T10:00:00-07:00',
+        },
+      });
+      const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
+      ok(data.rescheduled === false && /No upcoming/.test(data.message),
+         '3. customer with no upcoming -> rescheduled:false');
+    }
+
+    // 4. Phone normalization in reschedule_booking: 10-digit lookup matches +1-stored.
+    {
+      saveAppointments(apptSnapshot);
+      saveCustomers(custSnapshot);
+      const r = await client.callTool({
+        name: 'reschedule_booking',
+        arguments: {
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '(415) 555-0178', // 10-digit form, no leading 1
+          new_start_time: '2026-10-05T13:00:00-07:00',
+        },
+      });
+      const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
+      ok(data.rescheduled === true,
+         '4a. reschedule by 10-digit phone "(415) 555-0178" matches +1-stored David');
+      ok(data.appointment.id === 'apt-1001',
+         '4b. rescheduled the correct appointment (apt-1001)');
+    }
+  }
+
+  console.log('\n[7c] normalizePhone US normalization unit tests');
+  {
+    // Import the helper directly. It's not exported from types.js, so we
+    // exercise it indirectly via the get_appointment tool against a seeded
+    // customer with a +1-stored phone. We already cover (415) and bare
+    // forms above; here we add explicit equivalence assertions by checking
+    // that lookup with each variant finds the same fixture customer.
+    saveAppointments(apptSnapshot);
+    saveCustomers(custSnapshot);
+    // David's stored phone: "+1-415-555-0178" -> canonical "4155550178".
+    const variants = [
+      '+1-415-555-0178',
+      '1-415-555-0178',
+      '(415) 555-0178',
+      '415-555-0178',
+      '4155550178',
+    ];
+    for (const v of variants) {
+      const r = await client.callTool({
+        name: 'get_appointment',
+        arguments: { phone: v },
+      });
+      const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
+      ok(data.found === true && data.count === 1 && data.appointments[0].id === 'apt-1001',
+         `normalizePhone("${v}") matches David's "+1-415-555-0178"`);
+    }
+    // Negative: a partial / different number must NOT match.
+    const bad = await client.callTool({
+      name: 'get_appointment',
+      arguments: { phone: '415555017' }, // 9 digits (partial) -> must not match
+    });
+    const badData = JSON.parse((bad.content as Array<{ type: string; text: string }>)[0].text);
+    ok(badData.found === false, 'partial "415555017" does NOT match (full normalized only)');
   }
 
   console.log('\n[8] create_booking: optional therapist_id / auto-select');
@@ -924,7 +1093,7 @@ async function main() {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Auto Select', phone: '+1-415-555-0444' },
+          customer: { first_name: 'Auto', last_name: 'Select', phone: '+1-415-555-0444' },
           service: 'svc-swedish-massage',
           start_time: '2026-10-06T12:00:00-07:00', // Tue 12:00
           // no therapist_id
@@ -992,7 +1161,7 @@ async function main() {
         name: 'create_booking',
         arguments: {
           customer_id: '',
-          customer: { name: 'Empty Id', phone: '+1-415-555-0666' },
+          customer: { first_name: 'Empty', last_name: 'Id', phone: '+1-415-555-0666' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -1012,7 +1181,7 @@ async function main() {
         name: 'create_booking',
         arguments: {
           customer_id: CUS_ELENA,
-          customer: { name: 'Alex Chen', phone: '+1-310-555-0123' },
+          customer: { first_name: 'Alex', last_name: 'Chen', phone: '+1-310-555-0123' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -1474,7 +1643,9 @@ async function main() {
       const r = await client.callTool({
         name: 'reschedule_booking',
         arguments: {
-          appointment_id: 'apt-1001',
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
           new_start_time: 'October 5, 2026 1:00 PM',
         },
       });
@@ -1510,7 +1681,7 @@ async function main() {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Emily Chen', phone: '+1-415-555-1001' },
+          customer: { first_name: 'Emily', last_name: 'Chen', phone: '+1-415-555-1001' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -1543,7 +1714,7 @@ async function main() {
       const r1 = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'John Smith', phone: '+1-415-555-2001' },
+          customer: { first_name: 'John', last_name: 'Smith', phone: '+1-415-555-2001' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -1554,7 +1725,7 @@ async function main() {
       const r2 = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Jane Doe', phone: '+1-415-555-2002' },
+          customer: { first_name: 'Jane', last_name: 'Doe', phone: '+1-415-555-2002' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-priya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -1625,7 +1796,9 @@ async function main() {
       const r = await client.callTool({
         name: 'reschedule_booking',
         arguments: {
-          appointment_id: 'apt-1001',
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
           new_start_time: '2026-10-05T13:00:00-07:00',
         },
       });
@@ -1662,7 +1835,7 @@ async function main() {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Unique Newerson', phone: '+1-415-555-5001' },
+          customer: { first_name: 'Unique', last_name: 'Newerson', phone: '+1-415-555-5001' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -1686,7 +1859,7 @@ async function main() {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Elena Marsh', phone: '+1-415-555-0142' },
+          customer: { first_name: 'Elena', last_name: 'Marsh', phone: '+1-415-555-0142' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -1713,25 +1886,26 @@ async function main() {
       ];
       saveCustomers(seeded);
 
-      // Name only -> ambiguous, should error.
+      // No phone -> error (phone required for new customer; cannot match
+      // existing customers by name alone under the new phone-based resolution).
       const r1 = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Jordan Doe' },
+          customer: { first_name: 'Jordan', last_name: 'Doe' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
         },
       });
       const d1 = JSON.parse((r1.content as Array<{ type: string; text: string }>)[0].text);
-      ok((r1 as any).isError === true && /Multiple customers named/.test(JSON.stringify(d1)),
-         '4a. name-only with dupes -> disambiguation error');
+      ok((r1 as any).isError === true && /phone.*required/i.test(JSON.stringify(d1)),
+         '4a. no phone -> phone required error (not name disambiguation)');
 
-      // Name + phone -> resolves the right one.
+      // first_name + last_name + phone -> resolves the right existing customer.
       const r2 = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Jordan Doe', phone: '+1-415-555-6001' },
+          customer: { first_name: 'Jordan', last_name: 'Doe', phone: '+1-415-555-6001' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -1745,74 +1919,119 @@ async function main() {
          '4d. no new customer created (existing resolved)');
     }
 
-    // 5. get_appointment by customer_name (unique) returns appointments.
+    // 5. get_appointment by phone (unique customer) returns appointments.
     {
       saveAppointments(apptSnapshot);
       saveCustomers(custSnapshot);
       const r = await client.callTool({
         name: 'get_appointment',
-        arguments: { customer_name: 'Sofia Reyes' },
+        arguments: { phone: '+1-415-555-0199' }, // Sofia's fixture phone
       });
       const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
       ok(data.found === true && !data.ambiguous,
-         '5a. unique name -> found, not ambiguous');
+         '5a. unique phone -> found, not ambiguous');
       ok(data.count === 1 && data.appointments[0].id === 'apt-1002',
          '5b. returns Sofia\'s apt-1002');
       ok(data.appointments[0].customer_name === 'Sofia Reyes',
          '5c. appointment includes customer_name');
     }
 
-    // 6. get_appointment by customer_name (duplicate) returns candidates
-    //    for disambiguation — does NOT guess.
-    {
-      saveAppointments(apptSnapshot);
-      const dupId1 = randomUUID();
-      const dupId2 = randomUUID();
-      const seeded = [...custSnapshot,
-        { id: dupId1, name: 'Taylor Smith', phone: '+1-415-555-7001', email: '', postcode: '', date_of_birth: '' },
-        { id: dupId2, name: 'Taylor Smith', phone: '+1-415-555-7002', email: '', postcode: '', date_of_birth: '' },
-      ];
-      saveCustomers(seeded);
-
-      const r = await client.callTool({
-        name: 'get_appointment',
-        arguments: { customer_name: 'Taylor Smith' },
-      });
-      const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
-      ok(data.found === true && data.ambiguous === true,
-         '6a. duplicate name -> ambiguous flag set');
-      ok(Array.isArray(data.matching_customers) && data.matching_customers.length === 2,
-         '6b. returns 2 matching candidates');
-      ok(data.matching_customers.every((c: any) =>
-         c.customer_id && c.name === 'Taylor Smith' && !c.phone && !c.email),
-         '6c. candidates show ID+name only (no phone/email exposed)');
-      ok(/verify identity|additional verification/i.test(data.message),
-         '6d. message indicates additional verification required');
-
-      // Now resolve by UUID (one of the duplicates).
-      const r2 = await client.callTool({
-        name: 'get_appointment',
-        arguments: { customer_id: dupId1 },
-      });
-      const d2 = JSON.parse((r2.content as Array<{ type: string; text: string }>)[0].text);
-      ok(d2.found === false,
-         '6e. Taylor Smith #1 has no appointments (new fixture customer)');
-    }
-
-    // 7. get_appointment by customer_name with no match.
+    // 6. US phone normalization: 10-digit lookup matches +1-stored fixture.
+    //    Stored: "+1-415-555-0199" -> canonical "4155550199".
+    //    Lookup: "(415) 555-0199"  -> canonical "4155550199". Must match.
     {
       saveAppointments(apptSnapshot);
       saveCustomers(custSnapshot);
       const r = await client.callTool({
         name: 'get_appointment',
-        arguments: { customer_name: 'Nobody Here' },
+        arguments: { phone: '(415) 555-0199' }, // 10-digit form, no leading 1
       });
       const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
-      ok(data.found === false && /No customer named/.test(data.message),
-         '7. unknown name -> found:false with clear message');
+      ok(data.found === true && data.count === 1 && data.appointments[0].id === 'apt-1002',
+         '6. 10-digit "(415) 555-0199" matches +1-stored "+1-415-555-0199"');
     }
 
-    // 8. Phone not exposed in normal appointment responses.
+    // 6b. Bare 10-digit lookup also matches.
+    {
+      saveAppointments(apptSnapshot);
+      saveCustomers(custSnapshot);
+      const r = await client.callTool({
+        name: 'get_appointment',
+        arguments: { phone: '4155550199' },
+      });
+      const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
+      ok(data.found === true && data.appointments[0].id === 'apt-1002',
+         '6b. bare "4155550199" matches +1-stored fixture');
+    }
+
+    // 6c. "1-415-555-0199" (leading 1, no +) also matches.
+    {
+      saveAppointments(apptSnapshot);
+      saveCustomers(custSnapshot);
+      const r = await client.callTool({
+        name: 'get_appointment',
+        arguments: { phone: '1-415-555-0199' },
+      });
+      const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
+      ok(data.found === true && data.appointments[0].id === 'apt-1002',
+         '6c. "1-415-555-0199" (leading 1, no +) matches +1-stored fixture');
+    }
+
+    // 7. get_appointment by phone with no match -> found:false.
+    {
+      saveAppointments(apptSnapshot);
+      saveCustomers(custSnapshot);
+      const r = await client.callTool({
+        name: 'get_appointment',
+        arguments: { phone: '+1-999-999-9999' },
+      });
+      const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
+      ok(data.found === false && /No customer with phone/.test(data.message),
+         '7. unknown phone -> found:false with clear message');
+    }
+
+    // 8. Duplicate phone -> ambiguity error (never guess).
+    {
+      saveAppointments(apptSnapshot);
+      const dupId1 = randomUUID();
+      const dupId2 = randomUUID();
+      const sharedPhone = '+1-415-555-7000';
+      const seeded = [...custSnapshot,
+        { id: dupId1, name: 'Taylor Smith', phone: sharedPhone, email: '', postcode: '', date_of_birth: '' },
+        { id: dupId2, name: 'Taylor Jones', phone: sharedPhone, email: '', postcode: '', date_of_birth: '' },
+      ];
+      saveCustomers(seeded);
+
+      const r = await client.callTool({
+        name: 'get_appointment',
+        arguments: { phone: sharedPhone },
+      });
+      const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
+      ok(data.found === true && data.ambiguous === true,
+         '8a. duplicate phone -> ambiguous flag set');
+      ok(Array.isArray(data.matching_customers) && data.matching_customers.length === 2,
+         '8b. returns 2 matching candidates');
+      ok(data.matching_customers.every((c: any) =>
+         c.customer_id && c.name && !c.phone && !c.email),
+         '8c. candidates show ID+name only (no phone/email exposed)');
+      ok(/Multiple customers share phone/.test(data.message),
+         '8d. message indicates shared phone ambiguity');
+    }
+
+    // 9. Partial phone never matches (full normalized number only).
+    {
+      saveAppointments(apptSnapshot);
+      saveCustomers(custSnapshot);
+      // "415555" is a substring of Sofia's "14155550199" but should NOT match.
+      const r = await client.callTool({
+        name: 'get_appointment',
+        arguments: { phone: '415555' },
+      });
+      const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
+      ok(data.found === false, '9. partial phone number does NOT match');
+    }
+
+    // 10. Phone not exposed in normal appointment responses.
     {
       saveAppointments(apptSnapshot);
       saveCustomers(custSnapshot);
@@ -1825,30 +2044,32 @@ async function main() {
       ok(!Object.prototype.hasOwnProperty.call(appt, 'phone') &&
          !Object.prototype.hasOwnProperty.call(appt, 'email') &&
          !Object.prototype.hasOwnProperty.call(appt, 'date_of_birth'),
-         '8. phone/email/DOB not exposed in appointment response');
+         '10. phone/email/DOB not exposed in appointment response');
     }
 
-    // 9. reschedule preserves customer_name.
+    // 11. reschedule preserves customer_name.
     {
       saveAppointments(apptSnapshot);
       saveCustomers(custSnapshot);
       const r = await client.callTool({
         name: 'reschedule_booking',
         arguments: {
-          appointment_id: 'apt-1001',
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
           new_start_time: '2026-10-05T13:00:00-07:00',
         },
       });
       const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
-      ok(data.rescheduled === true, '9a. reschedule succeeds');
+      ok(data.rescheduled === true, '11a. reschedule succeeds');
       ok(data.appointment.customer_name === 'David Okonkwo',
-         '9b. customer_name preserved after reschedule');
+         '11b. customer_name preserved after reschedule');
       ok(data.appointment.customer_id === CUS_DAVID,
          '9c. customer_id UUID preserved after reschedule');
     }
   }
 
-  console.log('\n[15] create_booking: customer resolution by UUID, name+phone, name+email');
+  console.log('\n[15] create_booking: customer resolution by UUID and phone');
   {
     // 1. Existing customer by UUID.
     {
@@ -1878,7 +2099,7 @@ async function main() {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'David Okonkwo', phone: '+1-415-555-0178' },
+          customer: { first_name: 'David', last_name: 'Okonkwo', phone: '+1-415-555-0178' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -1892,23 +2113,25 @@ async function main() {
          '2c. no duplicate customer created');
     }
 
-    // 3. Existing customer by name + email (no phone).
+    // 3. Existing customer resolved by phone (US normalization: 10-digit
+    //    lookup matches +1-stored fixture).
     {
       saveAppointments(apptSnapshot);
       saveCustomers(custSnapshot);
+      // Sofia's fixture phone is "+1-415-555-0199"; pass 10-digit form.
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Sofia Reyes', email: 'sofia.reyes@example.com' },
+          customer: { first_name: 'Sofia', last_name: 'Reyes', phone: '(415) 555-0199' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
         },
       });
       const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
-      ok(data.success === true, '3a. name+email booking succeeds');
+      ok(data.success === true, '3a. phone-formatted booking succeeds');
       ok(data.customer_id === CUS_SOFIA,
-         '3b. resolved Sofia by name+email -> reused UUID');
+         '3b. resolved Sofia by normalized phone -> reused UUID');
       ok(loadCustomers().length === custSnapshot.length,
          '3c. no duplicate customer created');
     }
@@ -1921,7 +2144,7 @@ async function main() {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Brand Newperson', phone: '+1-415-555-9999' },
+          customer: { first_name: 'Brand', last_name: 'Newperson', phone: '+1-415-555-9999' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -1937,31 +2160,32 @@ async function main() {
          '4d. new customer persisted with correct name');
     }
 
-    // 5. Duplicate-name ambiguity: name only (no phone/email) -> error.
+    // 5. Duplicate-phone ambiguity -> error (never guess).
     {
       saveAppointments(apptSnapshot);
       const dupId1 = randomUUID();
       const dupId2 = randomUUID();
+      const sharedPhone = '+1-415-555-8000';
       const seeded = [...custSnapshot,
-        { id: dupId1, name: 'Alex Lee', phone: '+1-415-555-8001', email: 'alex1@example.com', postcode: '', date_of_birth: '' },
-        { id: dupId2, name: 'Alex Lee', phone: '+1-415-555-8002', email: 'alex2@example.com', postcode: '', date_of_birth: '' },
+        { id: dupId1, name: 'Alex Lee', phone: sharedPhone, email: 'alex1@example.com', postcode: '', date_of_birth: '' },
+        { id: dupId2, name: 'Alex Lee', phone: sharedPhone, email: 'alex2@example.com', postcode: '', date_of_birth: '' },
       ];
       saveCustomers(seeded);
 
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Alex Lee' },
+          customer: { first_name: 'Alex', last_name: 'Lee', phone: sharedPhone },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
         },
       });
       const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
-      ok((r as any).isError === true && /Multiple customers named/.test(JSON.stringify(data)),
-         '5a. name-only with dupes -> disambiguation error');
-      ok(/phone or email|customer_id/i.test(JSON.stringify(data)),
-         '5b. error suggests phone, email, or customer_id');
+      ok((r as any).isError === true && /Multiple customers share phone/.test(JSON.stringify(data)),
+         '5a. duplicate phone -> disambiguation error');
+      ok(/customer_id/i.test(JSON.stringify(data)),
+         '5b. error suggests customer_id');
     }
 
     // 6. Duplicate-name disambiguation by phone.
@@ -1978,7 +2202,7 @@ async function main() {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Casey Kim', phone: '+1-415-555-8101' },
+          customer: { first_name: 'Casey', last_name: 'Kim', phone: '+1-415-555-8101' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -1992,30 +2216,30 @@ async function main() {
          '6c. no new customer created (existing resolved)');
     }
 
-    // 7. Duplicate-name disambiguation by email (no phone).
+    // 7. Duplicate phone, different names -> still ambiguous (phone-based).
     {
       saveAppointments(apptSnapshot);
       const dupId1 = randomUUID();
       const dupId2 = randomUUID();
+      const sharedPhone = '+1-415-555-8200';
       const seeded = [...custSnapshot,
-        { id: dupId1, name: 'Morgan Bell', phone: '+1-415-555-8201', email: 'morgan1@example.com', postcode: '', date_of_birth: '' },
-        { id: dupId2, name: 'Morgan Bell', phone: '+1-415-555-8202', email: 'morgan2@example.com', postcode: '', date_of_birth: '' },
+        { id: dupId1, name: 'Morgan Bell', phone: sharedPhone, email: 'morgan1@example.com', postcode: '', date_of_birth: '' },
+        { id: dupId2, name: 'Morgan Bell', phone: sharedPhone, email: 'morgan2@example.com', postcode: '', date_of_birth: '' },
       ];
       saveCustomers(seeded);
 
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Morgan Bell', email: 'morgan2@example.com' },
+          customer: { first_name: 'Morgan', last_name: 'Bell', phone: sharedPhone },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
         },
       });
       const data = JSON.parse((r.content as Array<{ type: string; text: string }>)[0].text);
-      ok(data.success === true, '7a. name+email resolves duplicate');
-      ok(data.customer_id === dupId2,
-         '7b. resolved correct Morgan Bell (email morgan2)');
+      ok((r as any).isError === true && /Multiple customers share phone/.test(JSON.stringify(data)),
+         '7. duplicate phone -> still ambiguous regardless of name');
     }
 
     // 8. Duplicate prevention: name+phone matching an existing customer
@@ -2026,7 +2250,7 @@ async function main() {
       const before = loadCustomers().length;
       // Book twice with the same name+phone (Elena).
       const args = {
-        customer: { name: 'Elena Marsh', phone: '+1-415-555-0142' },
+        customer: { first_name: 'Elena', last_name: 'Marsh', phone: '+1-415-555-0142' },
         service: 'svc-swedish-massage',
         therapist_id: 'thr-maya',
         start_time: '2026-10-06T12:00:00-07:00',
@@ -2058,7 +2282,7 @@ async function main() {
       const r = await client.callTool({
         name: 'create_booking',
         arguments: {
-          customer: { name: 'Elena Marsh', phone: '+1-415-555-0143' }, // different phone
+          customer: { first_name: 'Elena', last_name: 'Marsh', phone: '+1-415-555-0143' }, // different phone
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -2293,12 +2517,12 @@ async function main() {
            '8c. appointment includes customer_name');
       }
 
-      // 9. create-booking (new customer) + get-appointment by customer_name.
+      // 9. create-booking (new customer) + get-appointment by phone.
       {
         saveAppointments(apptSnapshot);
         saveCustomers(custSnapshot);
         const r = await post('/api/create-booking', {
-          customer: { name: 'REST Newerson', phone: '+1-415-555-7777' },
+          customer: { first_name: 'REST', last_name: 'Newerson', phone: '+1-415-555-7777' },
           service: 'svc-swedish-massage',
           therapist_id: 'thr-maya',
           start_time: '2026-10-06T12:00:00-07:00',
@@ -2308,11 +2532,13 @@ async function main() {
            ![CUS_ELENA, CUS_DAVID, CUS_SOFIA].includes(r.data.customer_id),
            '9b. new customer got a fresh UUID');
 
-        const g = await post('/api/get-appointment', { customer_name: 'REST Newerson' });
+        const g = await post('/api/get-appointment', { phone: '+1-415-555-7777' });
         ok(g.status === 200 && g.data.found === true && g.data.count === 1,
-           '9c. get-appointment by customer_name 200 + found');
+           '9c. get-appointment by phone 200 + found');
         ok(g.data.appointments[0].customer_id === r.data.customer_id,
            '9d. appointment references the new UUID');
+        ok(g.data.appointments[0].customer_name === 'REST Newerson',
+           '9e. appointment customer_name built from first+last');
       }
 
       // 10. create-booking: validation error (missing customer identification).
@@ -2330,7 +2556,9 @@ async function main() {
         saveAppointments(apptSnapshot);
         saveCustomers(custSnapshot);
         const r = await post('/api/reschedule-booking', {
-          appointment_id: 'apt-1001',
+          first_name: 'David',
+          last_name: 'Okonkwo',
+          phone: '+1-415-555-0178',
           new_start_time: '2026-10-05T13:00:00-07:00',
         });
         ok(r.status === 200 && r.data.rescheduled === true,
@@ -2350,14 +2578,16 @@ async function main() {
            '12c. reschedule kept same therapist (no new requested)');
       }
 
-      // 13. reschedule-booking: validation error (unknown appointment).
+      // 13. reschedule-booking: validation error (unknown customer).
       {
         const r = await post('/api/reschedule-booking', {
-          appointment_id: 'apt-9999',
+          first_name: 'No',
+          last_name: 'Suchperson',
+          phone: '+1-999-999-9999',
           new_start_time: '2026-10-08T10:00:00-07:00',
         });
         ok(r.status === 200 && r.data.rescheduled === false,
-           '13. reschedule unknown appointment -> 200 rescheduled:false');
+           '13. reschedule unknown customer -> 200 rescheduled:false');
       }
 
       // 14. Duplicate-name ambiguity via REST.
@@ -2365,16 +2595,17 @@ async function main() {
         saveAppointments(apptSnapshot);
         const dupId1 = randomUUID();
         const dupId2 = randomUUID();
+        const sharedPhone = '+1-415-555-9000';
         const seeded = [...custSnapshot,
-          { id: dupId1, name: 'Rest Dup', phone: '+1-415-555-9001', email: '', postcode: '', date_of_birth: '' },
-          { id: dupId2, name: 'Rest Dup', phone: '+1-415-555-9002', email: '', postcode: '', date_of_birth: '' },
+          { id: dupId1, name: 'Rest DupA', phone: sharedPhone, email: '', postcode: '', date_of_birth: '' },
+          { id: dupId2, name: 'Rest DupB', phone: sharedPhone, email: '', postcode: '', date_of_birth: '' },
         ];
         saveCustomers(seeded);
 
-        const g = await post('/api/get-appointment', { customer_name: 'Rest Dup' });
+        const g = await post('/api/get-appointment', { phone: sharedPhone });
         ok(g.status === 200 && g.data.ambiguous === true &&
            g.data.matching_customers.length === 2,
-           '14. get-appointment duplicate name -> ambiguous candidates');
+           '14. get-appointment duplicate phone -> ambiguous candidates');
       }
 
       // 15. Invalid JSON body -> 400.
