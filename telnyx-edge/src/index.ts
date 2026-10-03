@@ -1,4 +1,5 @@
 import * as http from 'node:http';
+import { createHash } from 'node:crypto';
 import { env } from '@telnyx/edge-runtime';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
@@ -7,6 +8,36 @@ import {
   envelopeToResponse, type ToolEnvelope,
   handleDynamicContext,
 } from './handlers.js';
+
+// Observability helpers.
+// Hash caller identifiers before logging so raw phone numbers are never emitted.
+function callerRef(value: unknown): string | undefined {
+  if (typeof value !== 'string' || !value.trim()) return undefined;
+
+  return createHash('sha256')
+    .update(value.trim())
+    .digest('hex')
+    .slice(0, 12);
+}
+
+function extractCallerRef(args: Record<string, unknown>): string | undefined {
+  // Most tools accept phone directly.
+  if (typeof args.phone === 'string') {
+    return callerRef(args.phone);
+  }
+
+  // create-booking accepts new-customer details inside `customer`.
+  const customer = args.customer;
+  if (
+    customer &&
+    typeof customer === 'object' &&
+    typeof (customer as Record<string, unknown>).phone === 'string'
+  ) {
+    return callerRef((customer as Record<string, unknown>).phone);
+  }
+
+  return undefined;
+}
 
 // ---------- REST route table ----------
 // Each route maps to one async handler returning a ToolEnvelope. The server
@@ -47,10 +78,18 @@ async function readJsonObject(req: IncomingMessage): Promise<Record<string, unkn
 }
 
 // Structured JSON logging. NEVER log PII (phone, name, email, DOB, notes).
-function logApi(path: string, success: boolean, durationMs: number): void {
+function logApi(
+  path: string,
+  success: boolean,
+  durationMs: number,
+  args?: Record<string, unknown>,
+): void {
   console.log(JSON.stringify({
     event: 'api_request',
+    node: path.replace('/api/', '').replace(/-/g, '_'),
     path,
+    ...(args ? { caller_ref: extractCallerRef(args) } : {}),
+    outcome: success ? 'success' : 'error',
     success,
     duration_ms: durationMs,
   }));
@@ -104,6 +143,8 @@ const server = http.createServer(async (req, res) => {
       const durationMs = Date.now() - startedAt;
       console.log(JSON.stringify({
         event: 'dynamic_context',
+        node: 'conversation_initialization',
+        outcome: 'invalid_or_empty_payload',
         success: true,
         returning_customer: false,
         has_appointments: false,
@@ -126,6 +167,11 @@ const server = http.createServer(async (req, res) => {
       const durationMs = Date.now() - startedAt;
       console.log(JSON.stringify({
         event: 'dynamic_context',
+        node: 'conversation_initialization',
+        caller_ref: extractCallerRef(payload),
+        outcome: dynamic_variables.returning_customer === true
+          ? 'returning_customer'
+          : 'new_or_unknown_customer',
         success: true,
         returning_customer: dynamic_variables.returning_customer === true,
         has_appointments: dynamic_variables.has_appointments === true,
@@ -138,6 +184,9 @@ const server = http.createServer(async (req, res) => {
       const durationMs = Date.now() - startedAt;
       console.log(JSON.stringify({
         event: 'dynamic_context',
+        node: 'conversation_initialization',
+        caller_ref: extractCallerRef(payload),
+        outcome: 'fallback_after_error',
         success: false,
         returning_customer: false,
         has_appointments: false,
@@ -189,12 +238,15 @@ const server = http.createServer(async (req, res) => {
       if (path === '/api/create-booking' && env.bookingOutcome) {
         console.log(JSON.stringify({
           event: env.bookingOutcome,
+          node: 'create_booking',
           path,
-          success: status < 400,
+          caller_ref: extractCallerRef(args),
+          outcome: env.bookingOutcome,
+          success: env.bookingOutcome !== 'booking_rejected',
           duration_ms: durationMs,
         }));
       } else {
-        logApi(path, status < 400, durationMs);
+        logApi(path, status < 400, durationMs, args);
       }
 
       sendJson(res, status, body);
