@@ -5,6 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import {
   handleGetServiceInfo, handleCheckAvailability, handleCreateBooking,
   handleGetAppointment, handleRescheduleBooking,
+  handleCaptureSurveyRating, handleGetFeatureFlags,
   envelopeToResponse, type ToolEnvelope,
   handleDynamicContext,
 } from './handlers.js';
@@ -49,6 +50,8 @@ const ROUTES: Record<string, (args: Record<string, unknown>) => Promise<ToolEnve
   '/api/create-booking': handleCreateBooking,
   '/api/get-appointment': handleGetAppointment,
   '/api/reschedule-booking': handleRescheduleBooking,
+  '/api/capture-survey-rating': handleCaptureSurveyRating,
+  '/api/get-feature-flags': handleGetFeatureFlags,
 };
 
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
@@ -243,6 +246,18 @@ const server = http.createServer(async (req, res) => {
           caller_ref: extractCallerRef(args),
           outcome: env.bookingOutcome,
           success: env.bookingOutcome !== 'booking_rejected',
+          duration_ms: durationMs,
+        }));
+      } else if (
+        path === '/api/get-feature-flags' &&
+        typeof env.featureFlagValue === 'boolean'
+      ) {
+        console.log(JSON.stringify({
+          event: 'feature_flag_evaluated',
+          node: 'get_feature_flags',
+          path,
+          after_call_survey_enabled: env.featureFlagValue,
+          success: status < 400,
           duration_ms: durationMs,
         }));
       } else {

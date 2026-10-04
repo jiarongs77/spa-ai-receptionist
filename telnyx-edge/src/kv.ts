@@ -120,3 +120,25 @@ export async function writeCustomers(customers: Customer[]): Promise<void> {
 export async function writeAppointments(appointments: Appointment[]): Promise<void> {
   await kv().put('appointments', JSON.stringify(appointments));
 }
+
+/**
+ * Runtime feature flag for the optional after-call survey.
+ * Missing flag defaults to false so the existing call flow is unchanged.
+ */
+export async function readAfterCallSurveyEnabled(): Promise<boolean> {
+  const value = await kv().get<boolean>(
+    'feature/after_call_survey',
+    { type: 'json' },
+  );
+
+  return value === true;
+}
+
+export async function writeAfterCallSurveyEnabled(
+  enabled: boolean,
+): Promise<void> {
+  await kv().put(
+    'feature/after_call_survey',
+    JSON.stringify(enabled),
+  );
+}

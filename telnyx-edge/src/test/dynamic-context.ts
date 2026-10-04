@@ -183,8 +183,9 @@ async function main() {
        Object.prototype.hasOwnProperty.call(out.dynamic_variables, 'appointment_count') &&
        Object.prototype.hasOwnProperty.call(out.dynamic_variables, 'upcoming_service') &&
        Object.prototype.hasOwnProperty.call(out.dynamic_variables, 'upcoming_appointment_time') &&
-       Object.prototype.hasOwnProperty.call(out.dynamic_variables, 'suggested_workflow'),
-       'dynamic_variables contains all 7 expected fields');
+       Object.prototype.hasOwnProperty.call(out.dynamic_variables, 'suggested_workflow') &&
+       Object.prototype.hasOwnProperty.call(out.dynamic_variables, 'after_call_survey_enabled'),
+       'dynamic_variables contains all 8 expected fields');
   }
 
   console.log('\n[7] no PII beyond customer_first_name');
@@ -228,6 +229,45 @@ async function main() {
     ok(dv.returning_customer === false,
        'duplicate phone -> unknown (does not expose which customer)');
     ok(dv.customer_first_name === '', 'no first name leaked for ambiguous match');
+  }
+
+  console.log('\n[9] KV-based after-call survey feature flag');
+  {
+    const mem = new MemoryKv();
+    mem.set('customers', [CUS_ELENA]);
+    mem.set('appointments', []);
+    __setKvForTests(mem);
+
+    // Missing flag must fail closed so the existing workflow is unchanged.
+    let { dynamic_variables: dv } = await handleDynamicContext({
+      caller_phone_number: '+1-415-555-0142',
+    });
+    ok(dv.after_call_survey_enabled === false,
+      'missing feature flag defaults to false');
+
+    // Enable the feature entirely through KV.
+    mem.set('feature/after_call_survey', true);
+    ({ dynamic_variables: dv } = await handleDynamicContext({
+      caller_phone_number: '+1-415-555-0142',
+    }));
+    ok(dv.after_call_survey_enabled === true,
+      'KV flag true enables after-call survey');
+
+    // Disable it again without changing application code.
+    mem.set('feature/after_call_survey', false);
+    ({ dynamic_variables: dv } = await handleDynamicContext({
+      caller_phone_number: '+1-415-555-0142',
+    }));
+    ok(dv.after_call_survey_enabled === false,
+      'KV flag false disables after-call survey');
+
+    // Demonstrate a runtime false -> true toggle for the same caller.
+    mem.set('feature/after_call_survey', true);
+    ({ dynamic_variables: dv } = await handleDynamicContext({
+      caller_phone_number: '+1-415-555-0142',
+    }));
+    ok(dv.after_call_survey_enabled === true,
+      'same caller observes runtime KV toggle without redeployment');
   }
 
   console.log(`\n${pass} passed, ${fail} failed`);

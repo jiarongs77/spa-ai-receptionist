@@ -14,7 +14,7 @@ import {
 } from './types.js';
 import { computeAvailability, isSlotFree } from './availability.js';
 import { SERVICES, THERAPISTS } from './static-data.js';
-import { readCustomers, readAppointments, writeCustomers, writeAppointments } from './kv.js';
+import { readCustomers, readAppointments, writeCustomers, writeAppointments, readAfterCallSurveyEnabled } from './kv.js';
 
 // ---------- Shared result helpers ----------
 
@@ -24,6 +24,7 @@ export type ToolEnvelope = {
   // Optional discriminator for structured logging. Only set by handlers
   // that the server treats specially (currently create-booking).
   bookingOutcome?: 'booking_created' | 'booking_idempotent_replay' | 'booking_rejected';
+  featureFlagValue?: boolean;
 };
 
 function result(data: unknown): ToolEnvelope {
@@ -124,6 +125,42 @@ function projectAppointment(
 }
 
 // ---------- Handlers ----------
+
+export async function handleGetFeatureFlags(
+  _args: Record<string, unknown>,
+): Promise<ToolEnvelope> {
+  const afterCallSurveyEnabled = await readAfterCallSurveyEnabled();
+
+  const env = result({
+    success: true,
+    after_call_survey_enabled: afterCallSurveyEnabled,
+  });
+
+  env.featureFlagValue = afterCallSurveyEnabled;
+  return env;
+}
+
+export async function handleCaptureSurveyRating(
+  args: Record<string, unknown>
+): Promise<ToolEnvelope> {
+  const raw = args.rating;
+
+  const rating =
+    typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string'
+        ? Number(raw.trim())
+        : NaN;
+
+  if (!Number.isInteger(rating) || rating < 1 || rating > 5) {
+    return err('`rating` must be an integer from 1 through 5.');
+  }
+
+  return result({
+    success: true,
+    survey_rating: rating,
+  });
+}
 
 export async function handleGetServiceInfo(args: Record<string, unknown>): Promise<ToolEnvelope> {
   const query = str(args, 'service');
@@ -653,7 +690,9 @@ export function extractCallerPhone(payload: Record<string, unknown>): string {
 }
 
 /** Default dynamic_variables for an unknown / unresolvable caller. */
-function unknownDynamicVariables(): Record<string, unknown> {
+function unknownDynamicVariables(
+  afterCallSurveyEnabled = false,
+): Record<string, unknown> {
   return {
     returning_customer: false,
     customer_first_name: '',
@@ -662,6 +701,7 @@ function unknownDynamicVariables(): Record<string, unknown> {
     upcoming_service: '',
     upcoming_appointment_time: '',
     suggested_workflow: 'booking',
+    after_call_survey_enabled: afterCallSurveyEnabled,
   };
 }
 
@@ -677,11 +717,13 @@ export async function handleDynamicContext(
   payload: Record<string, unknown>,
 ): Promise<{ dynamic_variables: Record<string, unknown> }> {
   try {
+    const afterCallSurveyEnabled = await readAfterCallSurveyEnabled();
+
     const rawPhone = extractCallerPhone(payload);
     const normalized = normalizePhone(rawPhone);
 
     if (!normalized) {
-      return { dynamic_variables: unknownDynamicVariables() };
+      return { dynamic_variables: unknownDynamicVariables(afterCallSurveyEnabled) };
     }
 
     const customers = await readCustomers();
@@ -690,13 +732,13 @@ export async function handleDynamicContext(
     );
 
     if (matched.length === 0) {
-      return { dynamic_variables: unknownDynamicVariables() };
+      return { dynamic_variables: unknownDynamicVariables(afterCallSurveyEnabled) };
     }
 
     // Unique phone match is expected; if multiple share a phone, conservatively
     // treat as unknown (do not expose which customer).
     if (matched.length > 1) {
-      return { dynamic_variables: unknownDynamicVariables() };
+      return { dynamic_variables: unknownDynamicVariables(afterCallSurveyEnabled) };
     }
     const customer = matched[0];
 
@@ -754,6 +796,7 @@ export async function handleDynamicContext(
         upcoming_service: upcoming ? upcomingService : '',
         upcoming_appointment_time: upcoming ? upcoming.start_time : '',
         suggested_workflow: hasAppointments ? 'client_services' : 'booking',
+        after_call_survey_enabled: afterCallSurveyEnabled,
       },
     };
   } catch {
