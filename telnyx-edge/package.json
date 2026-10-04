@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node dist/src/index.js",
     "dev": "node --loader ts-node/esm src/index.ts",
-    "test": "node dist/src/test/dynamic-context.js && node dist/src/test/create-booking-idempotency.js"
+    "test": "node dist/src/test/dynamic-context.js && node dist/src/test/create-booking-idempotency.js && node dist/src/test/survey-rating.js"
   },
   "dependencies": {
     "@telnyx/edge-runtime": "latest"
