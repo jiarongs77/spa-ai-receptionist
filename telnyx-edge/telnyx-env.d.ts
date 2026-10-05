@@ -2,19 +2,16 @@
 
 import type { KvNamespace as __TelnyxKvNamespace } from "@telnyx/edge-runtime";
 import type { ActorNamespace as __TelnyxActorNamespace } from "@telnyx/edge-runtime";
-import type { BookingSessionActor } from "./src/booking-session-actor.js";
 
 declare global {
   interface Env {
     SPA_DATA: __TelnyxKvNamespace;
-    SPA_ACTOR: __TelnyxActorNamespace<BookingSessionActor>;
   }
 }
 
 declare module "@telnyx/edge-runtime" {
   interface Env {
     SPA_DATA: __TelnyxKvNamespace;
-    SPA_ACTOR: __TelnyxActorNamespace<BookingSessionActor>;
   }
 }
 
