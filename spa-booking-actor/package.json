@@ -1,0 +1,20 @@
+{
+  "name": "spa-booking-actor",
+  "version": "0.1.0",
+  "description": "Telnyx Edge StatefulActor function",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@telnyx/edge-runtime": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "^18.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

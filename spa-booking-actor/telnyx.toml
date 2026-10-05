@@ -1,0 +1,11 @@
+name = "spa-booking-actor"
+main = "src/index.ts"
+compatibility_date = "2026-05-01"
+
+[edge_compute]
+func_id = "b4eb31db-10dd-4b7c-8a5f-072a0dd952e0"
+func_name = "spa-booking-actor"
+
+[[actors]]
+binding = "SPA_ACTOR"
+type = "SpaBookingSessionActor"

@@ -7,3 +7,5 @@ func_name = "telnyx-edge"
 # Secrets are injected as environment variables into all your functions
 [storage.kv.SPA_DATA]
 id = "df5b1882-e055-488a-924a-63f6e16c7abc"
+
+

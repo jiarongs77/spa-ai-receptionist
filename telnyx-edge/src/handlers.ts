@@ -15,6 +15,7 @@ import {
 import { computeAvailability, isSlotFree } from './availability.js';
 import { SERVICES, THERAPISTS } from './static-data.js';
 import { readCustomers, readAppointments, writeCustomers, writeAppointments, readAfterCallSurveyEnabled } from './kv.js';
+import { normalizePhoneForKey } from './actor-access.js';
 
 // ---------- Shared result helpers ----------
 
@@ -285,6 +286,60 @@ export async function handleCreateBooking(args: Record<string, unknown>): Promis
       customer = buildNewCustomer(customerObj!, customers);
       customers.push(customer);
       await writeCustomers(customers);
+    }
+  }
+
+  // --- Update SpaBookingSessionActor (transient per-caller state) ---
+  // The dedicated sibling Edge Function owns the Stateful Actor.
+  // Same normalized phone = same actor instance. The actor performs the
+  // read-modify-write increment under its single-threaded execution model.
+  // Best-effort: actor failures never block the booking flow.
+  const phoneForActor = customer.phone;
+  const actorKey = normalizePhoneForKey(phoneForActor);
+  if (actorKey) {
+    try {
+      const actorResponse = await fetch(
+        'https://spa-booking-actor-b4eb31db-1.telnyxcompute.com/record-booking-attempt',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            phone: actorKey,
+            selectedService: service.name,
+            selectedTime: spaFormatISO(start),
+            bookingStep: 'create_booking',
+            lastIntent: 'book_appointment',
+          }),
+        },
+      );
+
+      if (!actorResponse.ok) {
+        throw new Error(`Actor HTTP ${actorResponse.status}: ${await actorResponse.text()}`);
+      }
+
+      const actorResult = await actorResponse.json() as {
+        state?: {
+          callCount?: number;
+          bookingAttemptCount?: number;
+          selectedService?: string;
+          bookingStep?: string;
+        };
+      };
+
+      console.info(JSON.stringify({
+        event: 'booking_session_actor_updated',
+        actor_key: actorKey,
+        call_count: actorResult.state?.callCount,
+        booking_attempt_count: actorResult.state?.bookingAttemptCount,
+        selected_service: actorResult.state?.selectedService,
+        booking_step: actorResult.state?.bookingStep,
+      }));
+    } catch (err) {
+      console.error(JSON.stringify({
+        event: 'booking_session_actor_error',
+        actor_key: actorKey,
+        error: err instanceof Error ? err.message : String(err),
+      }));
     }
   }
 
