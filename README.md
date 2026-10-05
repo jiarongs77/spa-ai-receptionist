@@ -229,11 +229,9 @@ This is intentionally stored in KV because a Boolean configuration value does no
 
 # 5. Stateful Actor
 
-The project uses a `BookingSessionActor` for **transient per-caller booking state**.
+The project uses a `SpaBookingSessionActor` for **transient per-caller booking state**.
 
-One normalized caller phone number maps to one actor instance.
-
-The actor tracks:
+One normalized caller phone number maps to one actor instance. The actor tracks:
 
 ```text
 callCount
@@ -245,48 +243,43 @@ bookingStep
 lastIntent
 ```
 
-Permanent customer and appointment records remain in KV. The actor is used only for state where single-threaded per-entity execution is valuable.
+Permanent customer and appointment data remains in KV. The actor handles concurrency-sensitive state where serialized execution is valuable.
 
-### Why an Actor?
+## Why a Stateful Actor?
 
-A booking attempt performs a true read-modify-write operation:
+Booking attempts require read-modify-write operations:
 
 ```ts
 const state = await this.getState();
-
 state.bookingAttemptCount += 1;
 state.callCount += 1;
-
 await this.ctx.storage.put("state", state);
 ```
 
-Without serialization, concurrent requests could read the same value and overwrite one another.
+The Stateful Actor serializes operations for each caller, preventing concurrent updates from overwriting one another without requiring an external lock.
 
-The Stateful Actor guarantees operations for one caller are processed serially, removing the need for an external lock.
+## Idempotency
 
-### Verified behavior
+Actor state tracks **booking attempts**, while KV stores actual appointments.
 
-The actor tests demonstrate:
+For example:
 
 ```text
-same caller:
-1 → 2 → 3 → 4
+Request 1 → bookingAttemptCount = 1 → booking_created
+Request 2 → bookingAttemptCount = 2 → booking_idempotent_replay
 
-different caller:
-independent state
-
-10 concurrent operations:
-bookingAttemptCount = 10
+Appointments created = 1
 ```
 
-This deliberately follows the **right primitive** principle:
+This behavior was verified in the deployed environment: repeated booking requests incremented the actor state while the booking API's idempotency protection prevented duplicate appointments.
 
 ```text
 KV
-→ shared lookup/configuration data
+→ customers, appointments, configuration
 
 Stateful Actor
-→ concurrency-sensitive per-caller state
+→ transient per-caller state
+→ concurrency-sensitive updates
 ```
 
 ---
