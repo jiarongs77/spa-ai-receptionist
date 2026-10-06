@@ -5,3 +5,4 @@ dist/
 .DS_Store
 telnyx-edge-v0.5.9-macos-amd64/
 edge-backup/
+.opencode/
